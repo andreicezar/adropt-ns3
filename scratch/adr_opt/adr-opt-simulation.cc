@@ -19,8 +19,6 @@
 #include "ns3/random-variable-stream.h"
 #include "ns3/rectangle.h"
 #include "ns3/string.h"
-
-// Include the ADRopt component header
 #include "ns3/adropt-component.h"
 
 using namespace ns3;
@@ -42,16 +40,16 @@ OnTxPowerChange(double oldTxPower, double newTxPower)
 
 int main(int argc, char* argv[])
 {
-    // --- Parameters, default values matching example ---
+    // --- Parameters for 3 devices, 8 gateways in 3x3km scenario ---
     bool verbose = false;
     bool adrEnabled = true;
     bool initializeSF = false;
-    int nDevices = 1; // Start with 1 device for testing
+    int nDevices = 3; // 3 end devices
     int nPeriodsOf20Minutes = 100;
     double mobileNodeProbability = 0.0;
-    double sideLengthMeters = 3000;
-    int gatewayDistanceMeters = 1500;
-    double maxRandomLossDb = 5;
+    double sideLengthMeters = 1500; // 3x3km total area (1.5km radius)
+    int gatewayDistanceMeters = 1000; // Closer gateways for better coverage
+    double maxRandomLossDb = 10; // More realistic channel variation
     double minSpeedMetersPerSecond = 2;
     double maxSpeedMetersPerSecond = 16;
     std::string adrType = "ns3::lorawan::ADRoptComponent"; // Use ADRopt
@@ -70,13 +68,13 @@ int main(int argc, char* argv[])
     cmd.AddValue("MaxSpeed", "Max speed (m/s) for mobile devices", maxSpeedMetersPerSecond);
     cmd.Parse(argc, argv);
 
-    // Calculate number of gateways - ensure at least 1
-    int gatewayRings = std::max(1, 2 + (int)((std::sqrt(2) * sideLengthMeters) / gatewayDistanceMeters));
-    int nGateways = std::max(1, 3 * gatewayRings * gatewayRings - 3 * gatewayRings + 1);
+    // Calculate number of gateways - fixed to 8 for this scenario
+    int nGateways = 8;
 
-    std::cout << "Simulation parameters:" << std::endl;
+    std::cout << "3 Devices + 8 Gateways in 3x3km Scenario:" << std::endl;
     std::cout << "  Devices: " << nDevices << std::endl;
     std::cout << "  Gateways: " << nGateways << std::endl;
+    std::cout << "  Area: " << (sideLengthMeters*2/1000.0) << "x" << (sideLengthMeters*2/1000.0) << " km" << std::endl;
     std::cout << "  ADR: " << (adrEnabled ? "Enabled" : "Disabled") << std::endl;
     std::cout << "  ADR Type: " << adrType << std::endl;
 
@@ -119,19 +117,32 @@ int main(int argc, char* argv[])
     Ptr<PropagationDelayModel> delay = CreateObject<ConstantSpeedPropagationDelayModel>();
     Ptr<LoraChannel> channel = CreateObject<LoraChannel>(loss, delay);
 
-    // --- Mobility ---
+    // --- Mobility: Spread devices across 3x3km area ---
     MobilityHelper mobilityEd, mobilityGw;
+    
+    // End devices: randomly distributed in 3x3km area
     mobilityEd.SetPositionAllocator("ns3::RandomRectanglePositionAllocator",
                                     "X", PointerValue(CreateObjectWithAttributes<UniformRandomVariable>(
-                                        "Min", DoubleValue(-sideLengthMeters/2),
-                                        "Max", DoubleValue(sideLengthMeters/2))),
+                                        "Min", DoubleValue(-sideLengthMeters),
+                                        "Max", DoubleValue(sideLengthMeters))),
                                     "Y", PointerValue(CreateObjectWithAttributes<UniformRandomVariable>(
-                                        "Min", DoubleValue(-sideLengthMeters/2),
-                                        "Max", DoubleValue(sideLengthMeters/2))));
+                                        "Min", DoubleValue(-sideLengthMeters),
+                                        "Max", DoubleValue(sideLengthMeters))));
     
-    Ptr<HexGridPositionAllocator> hexAllocator =
-        CreateObject<HexGridPositionAllocator>(gatewayDistanceMeters / 2);
-    mobilityGw.SetPositionAllocator(hexAllocator);
+    // Gateways: manually positioned for good coverage in 3x3km
+    Ptr<ListPositionAllocator> gwPositionAlloc = CreateObject<ListPositionAllocator>();
+    
+    // 8 gateways in strategic positions for 3x3km coverage
+    gwPositionAlloc->Add(Vector(-1000, -1000, 15)); // Southwest
+    gwPositionAlloc->Add(Vector(    0, -1000, 15)); // South
+    gwPositionAlloc->Add(Vector( 1000, -1000, 15)); // Southeast
+    gwPositionAlloc->Add(Vector(-1000,     0, 15)); // West
+    gwPositionAlloc->Add(Vector( 1000,     0, 15)); // East
+    gwPositionAlloc->Add(Vector(-1000,  1000, 15)); // Northwest
+    gwPositionAlloc->Add(Vector(    0,  1000, 15)); // North
+    gwPositionAlloc->Add(Vector( 1000,  1000, 15)); // Northeast
+    
+    mobilityGw.SetPositionAllocator(gwPositionAlloc);
     mobilityGw.SetMobilityModel("ns3::ConstantPositionMobilityModel");
 
     // --- Create gateways and install mobility/devices ---
@@ -191,12 +202,26 @@ int main(int argc, char* argv[])
     macHelper.SetRegion(LorawanMacHelper::EU);
     helper.Install(phyHelper, macHelper, endDevices);
 
-    // --- Application on end devices ---
-    int appPeriodSeconds = 60; // 1 minute for faster testing
+    // --- Application: Different packet intervals for each device ---
     PeriodicSenderHelper appHelper;
-    appHelper.SetPeriod(Seconds(appPeriodSeconds));
-    appHelper.SetPacketSize(23); // Standard LoRaWAN packet size
-    ApplicationContainer appContainer = appHelper.Install(endDevices);
+    
+    // Device 0: Every 2 minutes (fast)
+    appHelper.SetPeriod(Seconds(120));
+    appHelper.SetPacketSize(23);
+    ApplicationContainer appContainer1 = appHelper.Install(endDevices.Get(0));
+    
+    // Device 1: Every 5 minutes (medium)
+    appHelper.SetPeriod(Seconds(300));
+    ApplicationContainer appContainer2 = appHelper.Install(endDevices.Get(1));
+    
+    // Device 2: Every 10 minutes (slow)
+    appHelper.SetPeriod(Seconds(600));
+    ApplicationContainer appContainer3 = appHelper.Install(endDevices.Get(2));
+    
+    std::cout << "Application intervals:" << std::endl;
+    std::cout << "  Device 0: 2 minutes" << std::endl;
+    std::cout << "  Device 1: 5 minutes" << std::endl;
+    std::cout << "  Device 2: 10 minutes" << std::endl;
 
     // --- Optionally set spreading factors up
     if (initializeSF) {
@@ -240,14 +265,14 @@ int main(int argc, char* argv[])
         MakeCallback(&OnDataRateChange));
 
     // --- Periodic state/metrics output ---
-    Time stateSamplePeriod = Seconds(appPeriodSeconds * 10); // Sample every 10 periods
+    Time stateSamplePeriod = Seconds(600); // Sample every 10 minutes
     helper.EnablePeriodicDeviceStatusPrinting(endDevices, gateways, "nodeData.txt", stateSamplePeriod);
     helper.EnablePeriodicPhyPerformancePrinting(gateways, "phyPerformance.txt", stateSamplePeriod);
     helper.EnablePeriodicGlobalPerformancePrinting("globalPerformance.txt", stateSamplePeriod);
 
     // --- Run the simulation ---
-    Time simulationTime = Seconds(appPeriodSeconds * nPeriodsOf20Minutes);
-    std::cout << "Running simulation for " << simulationTime.GetSeconds() << " seconds..." << std::endl;
+    Time simulationTime = Seconds(7200); // 2 hours for multiple device interactions
+    std::cout << "Running simulation for " << simulationTime.GetSeconds() << " seconds (2 hours)..." << std::endl;
     
     Simulator::Stop(simulationTime);
     Simulator::Run();
@@ -256,9 +281,9 @@ int main(int argc, char* argv[])
     // --- Print a summary ---
     LoraPacketTracker& tracker = helper.GetPacketTracker();
     std::cout << "Simulation completed!" << std::endl;
-    std::cout << "Packets sent in final period: " 
-              << tracker.CountMacPacketsGlobally(Seconds(appPeriodSeconds * (nPeriodsOf20Minutes - 2)),
-                                                 Seconds(appPeriodSeconds * (nPeriodsOf20Minutes - 1)))
+    std::cout << "Final period packets: " 
+              << tracker.CountMacPacketsGlobally(Seconds(simulationTime.GetSeconds() - 1200),
+                                                 simulationTime)
               << std::endl;
 
     return 0;
