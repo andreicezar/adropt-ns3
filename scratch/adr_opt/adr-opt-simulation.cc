@@ -20,11 +20,17 @@
 #include "ns3/rectangle.h"
 #include "ns3/string.h"
 #include "ns3/adropt-component.h"
+#include "ns3/network-server.h"
 
 using namespace ns3;
 using namespace lorawan;
 
 NS_LOG_COMPONENT_DEFINE("AdrOptSimulation");
+
+// Global variables for tracking
+Ptr<ADRoptComponent> g_adrOptComponent;
+std::vector<uint32_t> g_deviceAddresses;
+std::string g_outputFile = "adr_transmission_stats.txt";
 
 void
 OnDataRateChange(uint8_t oldDr, uint8_t newDr)
@@ -36,6 +42,217 @@ void
 OnTxPowerChange(double oldTxPower, double newTxPower)
 {
     NS_LOG_INFO(oldTxPower << " dBm -> " << newTxPower << " dBm");
+}
+
+// Callback for NbTrans changes
+void
+OnNbTransChanged(uint32_t deviceAddr, uint8_t oldNbTrans, uint8_t newNbTrans)
+{
+    std::cout << "Time " << Simulator::Now().GetSeconds() << "s: "
+              << "Device " << deviceAddr 
+              << " NbTrans changed: " << static_cast<uint32_t>(oldNbTrans) 
+              << " -> " << static_cast<uint32_t>(newNbTrans) << std::endl;
+}
+
+// Callback for transmission efficiency updates
+void
+OnTransmissionEfficiencyChanged(uint32_t deviceAddr, double efficiency)
+{
+    std::cout << "Time " << Simulator::Now().GetSeconds() << "s: "
+              << "Device " << deviceAddr 
+              << " transmission efficiency: " << efficiency << std::endl;
+}
+
+// Callback for ADR adjustments
+void
+OnAdrAdjustment(uint32_t deviceAddr, uint8_t dataRate, double txPower, uint8_t nbTrans)
+{
+    std::cout << "Time " << Simulator::Now().GetSeconds() << "s: "
+              << "Device " << deviceAddr << " ADR adjustment - "
+              << "DR: " << static_cast<uint32_t>(dataRate)
+              << ", TxPower: " << txPower << " dBm"
+              << ", NbTrans: " << static_cast<uint32_t>(nbTrans) << std::endl;
+}
+
+// Periodic statistics printing
+void
+PrintPeriodicStats()
+{
+    if (!g_adrOptComponent)
+    {
+        return;
+    }
+    
+    std::cout << "\n=== Periodic ADR Statistics (Time: " 
+              << Simulator::Now().GetSeconds() << "s) ===" << std::endl;
+    
+    for (uint32_t deviceAddr : g_deviceAddresses)
+    {
+        uint8_t currentNbTrans = g_adrOptComponent->GetCurrentNbTrans(deviceAddr);
+        double efficiency = g_adrOptComponent->GetTransmissionEfficiency(deviceAddr);
+        uint32_t totalAttempts = g_adrOptComponent->GetTotalTransmissionAttempts(deviceAddr);
+        uint32_t adjustments = g_adrOptComponent->GetAdrAdjustmentCount(deviceAddr);
+        
+        std::cout << "Device " << deviceAddr << ":" << std::endl;
+        std::cout << "  Current NbTrans: " << static_cast<uint32_t>(currentNbTrans) << std::endl;
+        std::cout << "  Transmission Efficiency: " << efficiency << std::endl;
+        std::cout << "  Total Transmission Attempts: " << totalAttempts << std::endl;
+        std::cout << "  ADR Adjustments: " << adjustments << std::endl;
+    }
+    std::cout << "======================================\n" << std::endl;
+    
+    // Schedule next periodic print
+    Simulator::Schedule(Seconds(600), &PrintPeriodicStats); // Every 10 minutes
+}
+
+// Write detailed statistics to file
+void
+WriteDetailedStatsToFile()
+{
+    if (!g_adrOptComponent)
+    {
+        return;
+    }
+    
+    std::ofstream outFile(g_outputFile, std::ios::app);
+    if (!outFile.is_open())
+    {
+        NS_LOG_ERROR("Could not open output file: " << g_outputFile);
+        return;
+    }
+    
+    outFile << "Time: " << Simulator::Now().GetSeconds() << "s" << std::endl;
+    
+    for (uint32_t deviceAddr : g_deviceAddresses)
+    {
+        uint8_t currentNbTrans = g_adrOptComponent->GetCurrentNbTrans(deviceAddr);
+        double efficiency = g_adrOptComponent->GetTransmissionEfficiency(deviceAddr);
+        uint32_t totalAttempts = g_adrOptComponent->GetTotalTransmissionAttempts(deviceAddr);
+        uint32_t adjustments = g_adrOptComponent->GetAdrAdjustmentCount(deviceAddr);
+        
+        outFile << "Device," << deviceAddr 
+                << ",NbTrans," << static_cast<uint32_t>(currentNbTrans)
+                << ",Efficiency," << efficiency
+                << ",TotalAttempts," << totalAttempts
+                << ",Adjustments," << adjustments << std::endl;
+    }
+    outFile << "---" << std::endl;
+    outFile.close();
+    
+    // Schedule next write
+    Simulator::Schedule(Seconds(300), &WriteDetailedStatsToFile); // Every 5 minutes
+}
+
+// Extract device addresses from end devices
+void
+ExtractDeviceAddresses(NodeContainer endDevices)
+{
+    for (auto it = endDevices.Begin(); it != endDevices.End(); ++it)
+    {
+        Ptr<LoraNetDevice> loraNetDevice = (*it)->GetDevice(0)->GetObject<LoraNetDevice>();
+        if (loraNetDevice)
+        {
+            Ptr<LorawanMac> mac = loraNetDevice->GetMac();
+            if (mac)
+            {
+                Ptr<EndDeviceLorawanMac> edMac = DynamicCast<EndDeviceLorawanMac>(mac);
+                if (edMac)
+                {
+                    LoraDeviceAddress addr = edMac->GetDeviceAddress();
+                    g_deviceAddresses.push_back(addr.Get());
+                    std::cout << "Extracted device address: " << addr.Get() << std::endl;
+                }
+            }
+        }
+    }
+}
+
+// Final statistics summary
+void
+PrintFinalStatistics()
+{
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "         FINAL ADR STATISTICS" << std::endl;
+    std::cout << "========================================" << std::endl;
+    
+    if (!g_adrOptComponent)
+    {
+        std::cout << "No ADRopt component available for final statistics" << std::endl;
+        return;
+    }
+    
+    // Print comprehensive statistics
+    g_adrOptComponent->PrintTransmissionStatistics();
+    
+    // Summary table
+    std::cout << "\n--- SUMMARY TABLE ---" << std::endl;
+    std::cout << std::setw(10) << "Device" 
+              << std::setw(10) << "NbTrans" 
+              << std::setw(12) << "Efficiency" 
+              << std::setw(12) << "Attempts" 
+              << std::setw(12) << "ADR_Count" << std::endl;
+    std::cout << std::string(56, '-') << std::endl;
+    
+    double totalEfficiency = 0.0;
+    uint32_t totalAttempts = 0;
+    uint32_t totalAdjustments = 0;
+    
+    for (uint32_t deviceAddr : g_deviceAddresses)
+    {
+        uint8_t currentNbTrans = g_adrOptComponent->GetCurrentNbTrans(deviceAddr);
+        double efficiency = g_adrOptComponent->GetTransmissionEfficiency(deviceAddr);
+        uint32_t attempts = g_adrOptComponent->GetTotalTransmissionAttempts(deviceAddr);
+        uint32_t adjustments = g_adrOptComponent->GetAdrAdjustmentCount(deviceAddr);
+        
+        std::cout << std::setw(10) << deviceAddr
+                  << std::setw(10) << static_cast<uint32_t>(currentNbTrans)
+                  << std::setw(12) << std::fixed << std::setprecision(2) << efficiency
+                  << std::setw(12) << attempts
+                  << std::setw(12) << adjustments << std::endl;
+        
+        totalEfficiency += efficiency;
+        totalAttempts += attempts;
+        totalAdjustments += adjustments;
+    }
+    
+    std::cout << std::string(56, '-') << std::endl;
+    std::cout << std::setw(10) << "AVERAGE"
+              << std::setw(10) << "-"
+              << std::setw(12) << std::fixed << std::setprecision(2) 
+              << (g_deviceAddresses.empty() ? 0.0 : totalEfficiency / g_deviceAddresses.size())
+              << std::setw(12) << totalAttempts
+              << std::setw(12) << totalAdjustments << std::endl;
+    
+    // Write final summary to file
+    std::ofstream finalFile("final_adr_summary.txt");
+    if (finalFile.is_open())
+    {
+        finalFile << "Final ADR Statistics Summary" << std::endl;
+        finalFile << "Simulation Duration: " << Simulator::Now().GetSeconds() << " seconds" << std::endl;
+        finalFile << "Number of Devices: " << g_deviceAddresses.size() << std::endl;
+        finalFile << std::endl;
+        
+        finalFile << "Device,NbTrans,Efficiency,TotalAttempts,ADRCount" << std::endl;
+        for (uint32_t deviceAddr : g_deviceAddresses)
+        {
+            finalFile << deviceAddr << ","
+                      << static_cast<uint32_t>(g_adrOptComponent->GetCurrentNbTrans(deviceAddr)) << ","
+                      << g_adrOptComponent->GetTransmissionEfficiency(deviceAddr) << ","
+                      << g_adrOptComponent->GetTotalTransmissionAttempts(deviceAddr) << ","
+                      << g_adrOptComponent->GetAdrAdjustmentCount(deviceAddr) << std::endl;
+        }
+        
+        finalFile << std::endl;
+        finalFile << "Total Transmission Attempts: " << totalAttempts << std::endl;
+        finalFile << "Total ADR Adjustments: " << totalAdjustments << std::endl;
+        finalFile << "Average Transmission Efficiency: " 
+                  << (g_deviceAddresses.empty() ? 0.0 : totalEfficiency / g_deviceAddresses.size()) << std::endl;
+        
+        finalFile.close();
+        std::cout << "\nDetailed statistics written to: final_adr_summary.txt" << std::endl;
+    }
+    
+    std::cout << "========================================\n" << std::endl;
 }
 
 int main(int argc, char* argv[])
@@ -66,6 +283,7 @@ int main(int argc, char* argv[])
     cmd.AddValue("initializeSF", "Whether to initialize the SFs", initializeSF);
     cmd.AddValue("MinSpeed", "Min speed (m/s) for mobile devices", minSpeedMetersPerSecond);
     cmd.AddValue("MaxSpeed", "Max speed (m/s) for mobile devices", maxSpeedMetersPerSecond);
+    cmd.AddValue("outputFile", "Output file for transmission statistics", g_outputFile);
     cmd.Parse(argc, argv);
 
     // Calculate number of gateways - fixed to 8 for this scenario
@@ -77,6 +295,7 @@ int main(int argc, char* argv[])
     std::cout << "  Area: " << (sideLengthMeters*2/1000.0) << "x" << (sideLengthMeters*2/1000.0) << " km" << std::endl;
     std::cout << "  ADR: " << (adrEnabled ? "Enabled" : "Disabled") << std::endl;
     std::cout << "  ADR Type: " << adrType << std::endl;
+    std::cout << "  Output File: " << g_outputFile << std::endl;
 
     // --- Logging setup - be more selective to avoid excessive output ---
     if (verbose)
@@ -202,6 +421,9 @@ int main(int argc, char* argv[])
     macHelper.SetRegion(LorawanMacHelper::EU);
     helper.Install(phyHelper, macHelper, endDevices);
 
+    // --- Extract device addresses for tracking ---
+    ExtractDeviceAddresses(endDevices);
+
     // --- Application: Different packet intervals for each device ---
     PeriodicSenderHelper appHelper;
     
@@ -244,6 +466,13 @@ int main(int argc, char* argv[])
         gwRegistration.push_back({serverP2PNetDev, *gw});
     }
 
+    // --- Create ADRopt component first ---
+    if (adrEnabled && adrType == "ns3::lorawan::ADRoptComponent")
+    {
+        g_adrOptComponent = CreateObject<ADRoptComponent>();
+        std::cout << "ADRopt component created!" << std::endl;
+    }
+
     // --- Network server app ---
     NetworkServerHelper networkServerHelper;
     networkServerHelper.EnableAdr(adrEnabled);
@@ -251,6 +480,30 @@ int main(int argc, char* argv[])
     networkServerHelper.SetGatewaysP2P(gwRegistration);
     networkServerHelper.SetEndDevices(endDevices);
     networkServerHelper.Install(networkServer);
+
+    // --- Add our component and setup tracing ---
+    if (g_adrOptComponent)
+    {
+        Ptr<NetworkServer> ns = networkServer->GetApplication(0)->GetObject<NetworkServer>();
+        if (ns)
+        {
+            // Add our manually created component
+            ns->AddComponent(g_adrOptComponent);
+            std::cout << "ADRopt component added - enabling transmission tracking!" << std::endl;
+            
+            // Connect trace sources for real-time monitoring
+            g_adrOptComponent->TraceConnectWithoutContext("NbTransChanged", 
+                MakeCallback(&OnNbTransChanged));
+            g_adrOptComponent->TraceConnectWithoutContext("TransmissionEfficiency",
+                MakeCallback(&OnTransmissionEfficiencyChanged));
+            g_adrOptComponent->TraceConnectWithoutContext("AdrAdjustment",
+                MakeCallback(&OnAdrAdjustment));
+        }
+        else
+        {
+            std::cout << "Warning: Could not get NetworkServer!" << std::endl;
+        }
+    }
 
     // --- Forwarder app on gateways ---
     ForwarderHelper forwarderHelper;
@@ -270,12 +523,30 @@ int main(int argc, char* argv[])
     helper.EnablePeriodicPhyPerformancePrinting(gateways, "phyPerformance.txt", stateSamplePeriod);
     helper.EnablePeriodicGlobalPerformancePrinting("globalPerformance.txt", stateSamplePeriod);
 
+    // --- Initialize output file ---
+    std::ofstream initFile(g_outputFile);
+    if (initFile.is_open())
+    {
+        initFile << "ADR Transmission Statistics Log" << std::endl;
+        initFile << "Format: Time,Device,Field,Value" << std::endl;
+        initFile << "---" << std::endl;
+        initFile.close();
+    }
+
+    // --- Schedule periodic statistics printing ---
+    Simulator::Schedule(Seconds(600), &PrintPeriodicStats); // First print at 10 minutes
+    Simulator::Schedule(Seconds(300), &WriteDetailedStatsToFile); // First write at 5 minutes
+
     // --- Run the simulation ---
     Time simulationTime = Seconds(7200); // 2 hours for multiple device interactions
     std::cout << "Running simulation for " << simulationTime.GetSeconds() << " seconds (2 hours)..." << std::endl;
     
     Simulator::Stop(simulationTime);
     Simulator::Run();
+
+    // --- Print final statistics before destroying simulator ---
+    PrintFinalStatistics();
+
     Simulator::Destroy();
 
     // --- Print a summary ---

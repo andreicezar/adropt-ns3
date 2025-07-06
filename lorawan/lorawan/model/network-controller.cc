@@ -78,20 +78,5 @@ NetworkController::BeforeSendingReply(Ptr<EndDeviceStatus> endDeviceStatus)
     }
 }
 
-Ptr<NetworkControllerComponent>
-NetworkController::GetComponent(const std::string& typeName)
-{
-    NS_LOG_FUNCTION(this << typeName);
-    
-    for (auto it = m_components.begin(); it != m_components.end(); ++it)
-    {
-        if ((*it)->GetInstanceTypeId().GetName() == typeName)
-        {
-            return *it;
-        }
-    }
-    return nullptr;
-}
-
 } // namespace lorawan
 } // namespace ns3
