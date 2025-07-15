@@ -117,12 +117,6 @@ class NetworkServer : public Application
      * @return A pointer to the NetworkStatus object.
      */
     Ptr<NetworkStatus> GetNetworkStatus();
-    /**
-     * Get the NetworkController object of this NetworkServer application.
-     *
-     * @return A pointer to the NetworkController object.
-     */
-    Ptr<NetworkController> GetNetworkController();
 
   protected:
     Ptr<NetworkStatus> m_status;         //!< Ptr to the NetworkStatus object.

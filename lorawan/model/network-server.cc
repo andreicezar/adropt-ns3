@@ -180,11 +180,5 @@ NetworkServer::GetNetworkStatus()
     return m_status;
 }
 
-Ptr<NetworkController>
-NetworkServer::GetNetworkController()
-{
-    return m_controller;
-}
-
 } // namespace lorawan
 } // namespace ns3

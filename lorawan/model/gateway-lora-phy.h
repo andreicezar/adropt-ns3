@@ -95,7 +95,9 @@ class GatewayLoraPhy : public LoraPhy
 
     static const double sensitivity[6]; //!< A vector containing the sensitivities required to
                                         //!< correctly decode different spreading factors.
-
+    
+    // Packet, RSSI, SNIR, Gateway Node ID
+    TracedCallback<Ptr<const Packet>, double, double, uint32_t> m_phyRxOkRssiSnir;
   protected:
     /**
      * Signals the end of a transmission by the GatewayLoraPhy.

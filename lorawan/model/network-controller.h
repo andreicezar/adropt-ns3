@@ -70,21 +70,6 @@ class NetworkController : public Object
      * @param endDeviceStatus A pointer to the EndDeviceStatus object.
      */
     void BeforeSendingReply(Ptr<EndDeviceStatus> endDeviceStatus);
-    /**
-     * Get a NetworkControllerComponent by type name.
-     *
-     * @param typeName The TypeId name of the component to find.
-     * @return A pointer to the component, or nullptr if not found.
-     */
-    Ptr<NetworkControllerComponent> GetComponent(const std::string& typeName);
-
-    /**
-     * Get a NetworkControllerComponent by template type.
-     *
-     * @return A pointer to the component, or nullptr if not found.
-     */
-    template<typename T>
-    Ptr<T> GetComponent();
 
   private:
     Ptr<NetworkStatus> m_status; //!< A pointer to the NetworkStatus object.

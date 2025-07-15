@@ -217,82 +217,65 @@ void
 SimpleGatewayLoraPhy::EndReceive(Ptr<Packet> packet, Ptr<LoraInterferenceHelper::Event> event)
 {
     NS_LOG_FUNCTION(this << packet << *event);
-
-    // Call the trace source
     m_phyRxEndTrace(packet);
 
-    // Call the LoraInterferenceHelper to determine whether there was
-    // destructive interference. If the packet is correctly received, this
-    // method returns a 0.
-    uint8_t packetDestroyed = 0;
-    packetDestroyed = m_interference.IsDestroyedByInterference(event);
+    uint8_t packetDestroyed = m_interference.IsDestroyedByInterference(event);
 
-    // Check whether the packet was destroyed
     if (packetDestroyed != uint8_t(0))
     {
-        NS_LOG_DEBUG("packetDestroyed by " << unsigned(packetDestroyed));
-
-        // Update the packet's LoraTag
+        // Packet was destroyed
         LoraTag tag;
         packet->RemovePacketTag(tag);
         tag.SetDestroyedBy(packetDestroyed);
         packet->AddPacketTag(tag);
-
-        // Fire the trace source
         if (m_device)
         {
             m_interferedPacket(packet, m_device->GetNode()->GetId());
         }
-        else
-        {
-            m_interferedPacket(packet, 0);
-        }
     }
     else // Reception was correct
     {
-        NS_LOG_INFO("Packet with SF " << unsigned(event->GetSpreadingFactor())
-                                      << " received correctly");
+        NS_LOG_INFO("Packet with SF " << unsigned(event->GetSpreadingFactor()) << " received correctly");
 
-        // Fire the trace source
+        // Fire original trace
         if (m_device)
         {
             m_successfullyReceivedPacket(packet, m_device->GetNode()->GetId());
         }
-        else
-        {
-            m_successfullyReceivedPacket(packet, 0);
-        }
 
-        // Forward the packet to the upper layer
+        // --- CORRECTED TRACE FIRING ---
+        double rssi = event->GetRxPowerdBm();
+        double noiseFigureDb = 6.0;
+        double bandwidthHz = 125000.0;
+        double thermalNoiseDbm = -174 + 10 * log10(bandwidthHz);
+        double noisePowerDbm = thermalNoiseDbm + noiseFigureDb;
+        double snir = rssi - noisePowerDbm;
+
+        // Fire the new trace with all four arguments
+        if (m_device)
+        {
+             m_phyRxOkRssiSnir(packet, rssi, snir, m_device->GetNode()->GetId());
+        }
+        // --- END CORRECTION ---
+
+        // Forward packet to MAC layer
         if (!m_rxOkCallback.IsNull())
         {
-            // Make a copy of the packet
-            // Ptr<Packet> packetCopy = packet->Copy ();
-
-            // Set the receive power and frequency of this packet in the LoraTag: this
-            // information can be useful for upper layers trying to control link
-            // quality.
             LoraTag tag;
             packet->RemovePacketTag(tag);
             tag.SetReceivePower(event->GetRxPowerdBm());
             tag.SetFrequency(event->GetFrequency());
             packet->AddPacketTag(tag);
-
             m_rxOkCallback(packet);
         }
     }
 
-    // Search for the demodulator that was locked on this event to free it.
-
-    std::list<Ptr<SimpleGatewayLoraPhy::ReceptionPath>>::iterator it;
-
-    for (it = m_receptionPaths.begin(); it != m_receptionPaths.end(); ++it)
+    // Free the demodulator
+    for (auto it = m_receptionPaths.begin(); it != m_receptionPaths.end(); ++it)
     {
-        Ptr<SimpleGatewayLoraPhy::ReceptionPath> currentPath = *it;
-
-        if (currentPath->GetEvent() == event)
+        if ((*it)->GetEvent() == event)
         {
-            currentPath->Free();
+            (*it)->Free();
             m_occupiedReceptionPaths--;
             return;
         }

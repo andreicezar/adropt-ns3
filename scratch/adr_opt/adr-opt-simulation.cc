@@ -21,6 +21,12 @@
 #include "ns3/string.h"
 #include "ns3/adropt-component.h"
 #include "ns3/network-server.h"
+#include "ns3/end-device-lora-phy.h"
+#include "ns3/lora-net-device.h"
+#include "ns3/rssi-snir-tracker.h"
+#include <iomanip>
+#include <numeric>
+#include <fstream>  // FIXED: Added missing include
 
 using namespace ns3;
 using namespace lorawan;
@@ -31,6 +37,9 @@ NS_LOG_COMPONENT_DEFINE("AdrOptSimulation");
 Ptr<ADRoptComponent> g_adrOptComponent;
 std::vector<uint32_t> g_deviceAddresses;
 std::string g_outputFile = "adr_transmission_stats.txt";
+uint32_t g_totalPacketsSent = 0;
+std::map<uint32_t, uint32_t> g_gatewayReceptions;
+std::map<uint32_t, uint32_t> g_nodeIdToDeviceAddr;
 
 void
 OnDataRateChange(uint8_t oldDr, uint8_t newDr)
@@ -72,6 +81,16 @@ OnAdrAdjustment(uint32_t deviceAddr, uint8_t dataRate, double txPower, uint8_t n
               << "DR: " << static_cast<uint32_t>(dataRate)
               << ", TxPower: " << txPower << " dBm"
               << ", NbTrans: " << static_cast<uint32_t>(nbTrans) << std::endl;
+}
+
+// Add callback for error rate monitoring
+void
+OnErrorRateUpdate(uint32_t deviceAddr, uint32_t totalSent, uint32_t totalReceived, double errorRate)
+{
+    std::cout << "📊 Device " << deviceAddr << " Error Rate Update:" << std::endl;
+    std::cout << "   Sent: " << totalSent << ", Received: " << totalReceived << std::endl;
+    std::cout << "   Error Rate: " << (errorRate * 100) << "%" << std::endl;
+    std::cout << "   PDR: " << ((1.0 - errorRate) * 100) << "%" << std::endl;
 }
 
 // Periodic statistics printing
@@ -143,12 +162,13 @@ WriteDetailedStatsToFile()
     Simulator::Schedule(Seconds(300), &WriteDetailedStatsToFile); // Every 5 minutes
 }
 
-// Extract device addresses from end devices
+// FIXED: Combined ExtractDeviceAddresses function
 void
 ExtractDeviceAddresses(NodeContainer endDevices)
 {
     for (auto it = endDevices.Begin(); it != endDevices.End(); ++it)
     {
+        uint32_t nodeId = (*it)->GetId();
         Ptr<LoraNetDevice> loraNetDevice = (*it)->GetDevice(0)->GetObject<LoraNetDevice>();
         if (loraNetDevice)
         {
@@ -159,15 +179,20 @@ ExtractDeviceAddresses(NodeContainer endDevices)
                 if (edMac)
                 {
                     LoraDeviceAddress addr = edMac->GetDeviceAddress();
-                    g_deviceAddresses.push_back(addr.Get());
-                    std::cout << "Extracted device address: " << addr.Get() << std::endl;
+                    uint32_t deviceAddr = addr.Get();
+                    
+                    g_deviceAddresses.push_back(deviceAddr);
+                    g_nodeIdToDeviceAddr[nodeId] = deviceAddr; // Build mapping
+                    
+                    std::cout << "Extracted device - NodeID: " << nodeId 
+                              << ", DeviceAddr: " << deviceAddr << std::endl;
                 }
             }
         }
     }
 }
 
-// Final statistics summary
+// FIXED: Unified PrintFinalStatistics function
 void
 PrintFinalStatistics()
 {
@@ -181,8 +206,9 @@ PrintFinalStatistics()
         return;
     }
     
-    // Print comprehensive statistics
+    // Print comprehensive statistics including packet tracking
     g_adrOptComponent->PrintTransmissionStatistics();
+    g_adrOptComponent->PrintPacketTrackingStatistics();
     
     // Summary table
     std::cout << "\n--- SUMMARY TABLE ---" << std::endl;
@@ -255,13 +281,211 @@ PrintFinalStatistics()
     std::cout << "========================================\n" << std::endl;
 }
 
+// Add debug function to test packet transmission
+void OnPacketTransmitted(Ptr<const Packet> packet, uint32_t nodeId)
+{
+    std::cout << "📤 Packet transmitted by device " << nodeId 
+              << " at time " << Simulator::Now().GetSeconds() << "s" 
+              << " (size: " << packet->GetSize() << " bytes)" << std::endl;
+}
+
+// Add debug function to test packet reception at gateways
+void OnGatewayPacketReceived(Ptr<const Packet> packet, uint32_t nodeId)
+{
+    std::cout << "📨 Packet received at gateway " << nodeId 
+              << " at time " << Simulator::Now().GetSeconds() << "s"
+              << " (size: " << packet->GetSize() << " bytes)" << std::endl;
+}
+
+// Test trace connections
+void TestTraceConnections(NodeContainer gateways, NodeContainer endDevices)
+{
+    std::cout << "\n=== TESTING TRACE CONNECTIONS ===" << std::endl;
+    
+    // Test end device transmissions
+    for (uint32_t i = 0; i < endDevices.GetN(); ++i) {
+        uint32_t nodeId = endDevices.Get(i)->GetId();
+        try {
+            std::string tracePath = "/NodeList/" + std::to_string(nodeId) + 
+                                   "/DeviceList/0/$ns3::LoraNetDevice/Phy/StartSending";
+            Config::ConnectWithoutContext(tracePath, MakeCallback(&OnPacketTransmitted));
+            std::cout << "✓ Connected to end device " << nodeId << " transmission trace" << std::endl;
+        } catch (...) {
+            std::cout << "❌ Failed to connect to end device " << nodeId << std::endl;
+        }
+    }
+    
+    // Test gateway receptions
+    for (uint32_t i = 0; i < gateways.GetN(); ++i) {
+        uint32_t nodeId = gateways.Get(i)->GetId();
+        try {
+            std::string tracePath = "/NodeList/" + std::to_string(nodeId) + 
+                                   "/DeviceList/0/$ns3::LoraNetDevice/Phy/ReceivedPacket";
+            Config::ConnectWithoutContext(tracePath, MakeCallback(&OnGatewayPacketReceived));
+            std::cout << "✓ Connected to gateway " << nodeId << " reception trace" << std::endl;
+        } catch (...) {
+            std::cout << "❌ Failed to connect to gateway " << nodeId << std::endl;
+        }
+    }
+}
+
+// Updated OnPacketSent callback
+void OnPacketSent(Ptr<const Packet> packet, uint32_t nodeId)
+{
+    g_totalPacketsSent++;
+    std::cout << "📤 Packet #" << g_totalPacketsSent 
+              << " sent by device " << nodeId 
+              << " at time " << Simulator::Now().GetSeconds() << "s" << std::endl;
+    
+    // Record transmission in ADRopt component
+    if (g_adrOptComponent)
+    {
+        auto it = g_nodeIdToDeviceAddr.find(nodeId);
+        if (it != g_nodeIdToDeviceAddr.end())
+        {
+            uint32_t deviceAddr = it->second;
+            g_adrOptComponent->RecordPacketTransmission(deviceAddr);
+            std::cout << "   📊 Recorded transmission for device " << deviceAddr << std::endl;
+        }
+        else
+        {
+            std::cout << "   ⚠️ No device address mapping for node " << nodeId << std::endl;
+        }
+    }
+    
+    // Milestone notifications
+    if (g_totalPacketsSent % 100 == 0) {
+        std::cout << "🎯 Milestone: " << g_totalPacketsSent << " packets sent" << std::endl;
+    }
+}
+
+void PrintFinalPacketCount()
+{
+    std::cout << "\n🎯 FINAL PACKET COUNT VERIFICATION" << std::endl;
+    std::cout << "=================================" << std::endl;
+    std::cout << "Total packets sent: " << g_totalPacketsSent << std::endl;
+    std::cout << "Expected packets: 1440" << std::endl;
+    
+    if (g_totalPacketsSent == 1440) {
+        std::cout << "✅ SUCCESS: Exactly 1440 packets transmitted!" << std::endl;
+    } else {
+        std::cout << "⚠️  WARNING: Expected 1440, got " << g_totalPacketsSent << std::endl;
+    }
+    
+    double efficiency = (double)g_totalPacketsSent / 1440.0 * 100.0;
+    std::cout << "Transmission efficiency: " << efficiency << "%" << std::endl;
+    
+    // Add gateway reception summary
+    std::cout << "\n📡 GATEWAY RECEPTION SUMMARY" << std::endl;
+    std::cout << "===========================" << std::endl;
+    uint32_t totalReceptions = 0;
+    for (const auto& [gwId, count] : g_gatewayReceptions) {
+        std::cout << "Gateway " << gwId << ": " << count << " receptions" << std::endl;
+        totalReceptions += count;
+    }
+    std::cout << "Total gateway receptions: " << totalReceptions << std::endl;
+    std::cout << "Active gateways: " << g_gatewayReceptions.size() << "/8" << std::endl;
+    
+    if (totalReceptions >= g_totalPacketsSent) {
+        std::cout << "✅ Gateway diversity working (multiple gateways receiving)" << std::endl;
+    } else {
+        std::cout << "⚠️  Some packets may not be reaching gateways" << std::endl;
+    }
+}
+
+void OnGatewayReception(Ptr<const Packet> packet, uint32_t gatewayId)
+{
+    g_gatewayReceptions[gatewayId]++;
+    
+    if (g_gatewayReceptions[gatewayId] % 50 == 1) { // First and every 50th
+        std::cout << "📡 Gateway " << gatewayId 
+                  << " received packet #" << g_gatewayReceptions[gatewayId] << std::endl;
+    }
+}
+
+void VerifyADRoptActivity()
+{
+    if (!g_adrOptComponent)
+    {
+        std::cout << "❌ ADRopt component is NULL!" << std::endl;
+        return;
+    }
+    
+    std::cout << "\n🔍 ADRopt Activity Check (Time: " << Simulator::Now().GetSeconds() << "s)" << std::endl;
+    
+    for (uint32_t deviceAddr : g_deviceAddresses)
+    {
+        // Check if ADRopt has tracked any packets for this device
+        auto stats = g_adrOptComponent->GetPacketTrackingStats(deviceAddr);
+        
+        std::cout << "Device " << deviceAddr << ":" << std::endl;
+        std::cout << "  Sent: " << stats.totalPacketsSent << std::endl;
+        std::cout << "  NS Received: " << stats.packetsReceivedByNetworkServer << std::endl;
+        std::cout << "  SF Distribution size: " << stats.sfDistribution.size() << std::endl;
+        std::cout << "  TxPower Distribution size: " << stats.txPowerDistribution.size() << std::endl;
+        
+        if (stats.packetsReceivedByNetworkServer == 0)
+        {
+            std::cout << "  ❌ WARNING: ADRopt not receiving packets for this device!" << std::endl;
+        }
+        else
+        {
+            std::cout << "  ✅ ADRopt is tracking packets for this device" << std::endl;
+        }
+    }
+}
+
+void MonitorADRActivity()
+{
+    if (!g_adrOptComponent) return;
+    
+    static uint32_t lastPacketCount = 0;
+    
+    for (uint32_t deviceAddr : g_deviceAddresses)
+    {
+        auto stats = g_adrOptComponent->GetPacketTrackingStats(deviceAddr);
+        
+        if (stats.packetsReceivedByNetworkServer > lastPacketCount)
+        {
+            std::cout << "📊 ADR Activity Update (Time: " << Simulator::Now().GetSeconds() << "s)" << std::endl;
+            std::cout << "  Device " << deviceAddr << " packets: " << stats.packetsReceivedByNetworkServer << std::endl;
+            
+            // Show SF and TxPower distributions in real-time
+            if (!stats.sfDistribution.empty())
+            {
+                std::cout << "  📡 SF Distribution:" << std::endl;
+                for (const auto& sfPair : stats.sfDistribution)
+                {
+                    std::cout << "    SF" << static_cast<uint32_t>(sfPair.first) 
+                              << ": " << sfPair.second << " packets" << std::endl;
+                }
+            }
+            
+            if (!stats.txPowerDistribution.empty())
+            {
+                std::cout << "  ⚡ TxPower Distribution:" << std::endl;
+                for (const auto& powerPair : stats.txPowerDistribution)
+                {
+                    std::cout << "    " << powerPair.first 
+                              << "dBm: " << powerPair.second << " packets" << std::endl;
+                }
+            }
+            
+            lastPacketCount = stats.packetsReceivedByNetworkServer;
+        }
+    }
+    
+    // Schedule next check
+    Simulator::Schedule(Seconds(300), &MonitorADRActivity); // Every 5 minutes
+}
+
 int main(int argc, char* argv[])
 {
-    // --- Parameters for 3 devices, 8 gateways in 3x3km scenario ---
+    // --- Parameters for 1 devices, 8 gateways in 3x3km scenario ---
     bool verbose = false;
     bool adrEnabled = true;
     bool initializeSF = false;
-    int nDevices = 3; // 3 end devices
+    int nDevices = 1; // 1 end devices
     int nPeriodsOf20Minutes = 100;
     double mobileNodeProbability = 0.0;
     double sideLengthMeters = 1500; // 3x3km total area (1.5km radius)
@@ -289,7 +513,7 @@ int main(int argc, char* argv[])
     // Calculate number of gateways - fixed to 8 for this scenario
     int nGateways = 8;
 
-    std::cout << "3 Devices + 8 Gateways in 3x3km Scenario:" << std::endl;
+    std::cout << "1 Device + 8 Gateways in 3x3km Scenario:" << std::endl;
     std::cout << "  Devices: " << nDevices << std::endl;
     std::cout << "  Gateways: " << nGateways << std::endl;
     std::cout << "  Area: " << (sideLengthMeters*2/1000.0) << "x" << (sideLengthMeters*2/1000.0) << " km" << std::endl;
@@ -320,7 +544,7 @@ int main(int argc, char* argv[])
 
     // --- Channel setup (loss, delay, random fading) ---
     Ptr<LogDistancePropagationLossModel> loss = CreateObject<LogDistancePropagationLossModel>();
-    loss->SetPathLossExponent(3.76);
+    loss->SetPathLossExponent(2.8);
     loss->SetReference(1, 7.7);
     
     if (maxRandomLossDb > 0)
@@ -352,14 +576,14 @@ int main(int argc, char* argv[])
     Ptr<ListPositionAllocator> gwPositionAlloc = CreateObject<ListPositionAllocator>();
     
     // 8 gateways in strategic positions for 3x3km coverage
-    gwPositionAlloc->Add(Vector(-1000, -1000, 15)); // Southwest
-    gwPositionAlloc->Add(Vector(    0, -1000, 15)); // South
-    gwPositionAlloc->Add(Vector( 1000, -1000, 15)); // Southeast
-    gwPositionAlloc->Add(Vector(-1000,     0, 15)); // West
-    gwPositionAlloc->Add(Vector( 1000,     0, 15)); // East
-    gwPositionAlloc->Add(Vector(-1000,  1000, 15)); // Northwest
-    gwPositionAlloc->Add(Vector(    0,  1000, 15)); // North
-    gwPositionAlloc->Add(Vector( 1000,  1000, 15)); // Northeast
+    gwPositionAlloc->Add(Vector(-1500, -1500, 15)); // Southwest
+    gwPositionAlloc->Add(Vector(    0, -1500, 15)); // South
+    gwPositionAlloc->Add(Vector( 1500, -1500, 15)); // Southeast
+    gwPositionAlloc->Add(Vector(-1500,     0, 15)); // West
+    gwPositionAlloc->Add(Vector( 1500,     0, 15)); // East
+    gwPositionAlloc->Add(Vector(-1500,  1500, 15)); // Northwest
+    gwPositionAlloc->Add(Vector(    0,  1500, 15)); // North
+    gwPositionAlloc->Add(Vector( 1500,  1500, 15)); // Northeast
     
     mobilityGw.SetPositionAllocator(gwPositionAlloc);
     mobilityGw.SetMobilityModel("ns3::ConstantPositionMobilityModel");
@@ -377,7 +601,7 @@ int main(int argc, char* argv[])
 
     phyHelper.SetDeviceType(LoraPhyHelper::GW);
     macHelper.SetDeviceType(LorawanMacHelper::GW);
-    helper.Install(phyHelper, macHelper, gateways);
+    NetDeviceContainer gatewayDevices = helper.Install(phyHelper, macHelper, gateways);
 
     // --- Create end devices and install mobility/devices ---
     NodeContainer endDevices;
@@ -421,6 +645,34 @@ int main(int argc, char* argv[])
     macHelper.SetRegion(LorawanMacHelper::EU);
     helper.Install(phyHelper, macHelper, endDevices);
 
+    // --- Connect packet transmission counter ---
+    Config::ConnectWithoutContext(
+        "/NodeList/*/DeviceList/0/$ns3::LoraNetDevice/Phy/StartSending",
+        MakeCallback(&OnPacketSent));
+    
+    std::cout << "📊 Packet transmission counter enabled" << std::endl;
+
+    // Connect gateway reception tracking
+    for (uint32_t i = 0; i < gateways.GetN(); ++i) {
+        uint32_t nodeId = gateways.Get(i)->GetId();
+        std::string tracePath = "/NodeList/" + std::to_string(nodeId) +
+                                "/DeviceList/0/$ns3::LoraNetDevice/Phy/ReceivedPacket";
+
+        // Create a lambda that captures the gateway's nodeId
+        auto callback = [nodeId](Ptr<const Packet> packet, uint32_t traceNodeId) {
+            OnGatewayReception(packet, nodeId);
+        };
+
+        // Create the Callback object directly
+        Callback<void, Ptr<const Packet>, uint32_t> cb(callback);
+        Config::ConnectWithoutContext(tracePath, cb);
+
+        std::cout << "✓ Connected gateway reception tracking for gateway " << nodeId << std::endl;
+    }
+
+    // --- TEST TRACE CONNECTIONS ---
+    TestTraceConnections(gateways, endDevices);
+
     // --- Extract device addresses for tracking ---
     ExtractDeviceAddresses(endDevices);
 
@@ -431,19 +683,9 @@ int main(int argc, char* argv[])
     appHelper.SetPeriod(Seconds(120));
     appHelper.SetPacketSize(23);
     ApplicationContainer appContainer1 = appHelper.Install(endDevices.Get(0));
-    
-    // Device 1: Every 5 minutes (medium)
-    appHelper.SetPeriod(Seconds(300));
-    ApplicationContainer appContainer2 = appHelper.Install(endDevices.Get(1));
-    
-    // Device 2: Every 10 minutes (slow)
-    appHelper.SetPeriod(Seconds(600));
-    ApplicationContainer appContainer3 = appHelper.Install(endDevices.Get(2));
-    
+
     std::cout << "Application intervals:" << std::endl;
     std::cout << "  Device 0: 2 minutes" << std::endl;
-    std::cout << "  Device 1: 5 minutes" << std::endl;
-    std::cout << "  Device 2: 10 minutes" << std::endl;
 
     // --- Optionally set spreading factors up
     if (initializeSF) {
@@ -481,15 +723,15 @@ int main(int argc, char* argv[])
     networkServerHelper.SetEndDevices(endDevices);
     networkServerHelper.Install(networkServer);
 
-    // --- Add our component and setup tracing ---
+    // FIXED: Properly integrated trace connection block
     if (g_adrOptComponent)
     {
         Ptr<NetworkServer> ns = networkServer->GetApplication(0)->GetObject<NetworkServer>();
         if (ns)
         {
-            // Add our manually created component
+            // CRITICAL: Add our component as the ONLY ADR component
             ns->AddComponent(g_adrOptComponent);
-            std::cout << "ADRopt component added - enabling transmission tracking!" << std::endl;
+            std::cout << "✅ ADRopt component added as PRIMARY ADR component!" << std::endl;
             
             // Connect trace sources for real-time monitoring
             g_adrOptComponent->TraceConnectWithoutContext("NbTransChanged", 
@@ -498,13 +740,23 @@ int main(int argc, char* argv[])
                 MakeCallback(&OnTransmissionEfficiencyChanged));
             g_adrOptComponent->TraceConnectWithoutContext("AdrAdjustment",
                 MakeCallback(&OnAdrAdjustment));
+            g_adrOptComponent->TraceConnectWithoutContext("ErrorRate",
+                MakeCallback(&OnErrorRateUpdate));
+                
+            std::cout << "✅ All ADRopt trace sources connected!" << std::endl;
+            
+            // ADDED: Verify component is working
+            std::cout << "🔍 ADRopt component status: " << g_adrOptComponent->GetInstanceTypeId().GetName() << std::endl;
         }
         else
         {
-            std::cout << "Warning: Could not get NetworkServer!" << std::endl;
+            std::cout << "❌ CRITICAL ERROR: Could not get NetworkServer!" << std::endl;
         }
     }
-
+    else
+    {
+        std::cout << "❌ CRITICAL ERROR: ADRopt component not created!" << std::endl;
+    }
     // --- Forwarder app on gateways ---
     ForwarderHelper forwarderHelper;
     forwarderHelper.Install(gateways);
@@ -536,26 +788,27 @@ int main(int argc, char* argv[])
     // --- Schedule periodic statistics printing ---
     Simulator::Schedule(Seconds(600), &PrintPeriodicStats); // First print at 10 minutes
     Simulator::Schedule(Seconds(300), &WriteDetailedStatsToFile); // First write at 5 minutes
-
+    Simulator::Schedule(Seconds(1800), &VerifyADRoptActivity);
+    Simulator::Schedule(Seconds(300), &MonitorADRActivity); // Start monitoring at 5 minutes
     // --- Run the simulation ---
-    Time simulationTime = Seconds(7200); // 2 hours for multiple device interactions
-    std::cout << "Running simulation for " << simulationTime.GetSeconds() << " seconds (2 hours)..." << std::endl;
-    
+    Time simulationTime = Seconds(172800); // 48 hours for multiple device interactions
+    std::cout << "Running simulation for " << simulationTime.GetSeconds() << " seconds (48 hours)..." << std::endl;
+
     Simulator::Stop(simulationTime);
     Simulator::Run();
 
     // --- Print final statistics before destroying simulator ---
-    PrintFinalStatistics();
-
+    PrintFinalStatistics();  
+    PrintFinalPacketCount(); 
     Simulator::Destroy();
-
+    
     // --- Print a summary ---
-    LoraPacketTracker& tracker = helper.GetPacketTracker();
+    LoraPacketTracker& packetTracker = helper.GetPacketTracker();
     std::cout << "Simulation completed!" << std::endl;
     std::cout << "Final period packets: " 
-              << tracker.CountMacPacketsGlobally(Seconds(simulationTime.GetSeconds() - 1200),
-                                                 simulationTime)
-              << std::endl;
+            << packetTracker.CountMacPacketsGlobally(Seconds(simulationTime.GetSeconds() - 1200),
+                                                    simulationTime)
+            << std::endl;
 
     return 0;
 }

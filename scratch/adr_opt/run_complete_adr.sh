@@ -20,6 +20,6 @@ MIN_SPEED=2
 MAX_SPEED=16
 
 # Run the simulation (all arguments are recognized by your C++ main)
-./ns3 run "adr_opt/adr-opt-simulation --verbose=$VERBOSE --AdrEnabled=$ADR_ENABLED  --nDevices=$N_DEVICES  --PeriodsToSimulate=$PERIODS  --sideLength=$SIDE_LENGTH  --gatewayDistance=$GATEWAY_DISTANCE  --maxRandomLoss=$MAX_RANDOM_LOSS --initializeSF=$INITIALIZE_SF  --MobileNodeProbability=$MOBILE_PROB  --MinSpeed=$MIN_SPEED  --MaxSpeed=$MAX_SPEED" > multi_device_simulation.log 2>&1
+./ns3 run "adr_opt/adr-opt-simulation --verbose=$VERBOSE --AdrEnabled=$ADR_ENABLED  --nDevices=$N_DEVICES  --PeriodsToSimulate=$PERIODS  --sideLength=$SIDE_LENGTH  --gatewayDistance=$GATEWAY_DISTANCE  --maxRandomLoss=$MAX_RANDOM_LOSS --initializeSF=$INITIALIZE_SF  --MobileNodeProbability=$MOBILE_PROB  --MinSpeed=$MIN_SPEED  --MaxSpeed=$MAX_SPEED" > multi_device_simulation.txt 2>&1
 
 echo "Multi-device simulation completed. Check multi_device_simulation.log for detailed results."
