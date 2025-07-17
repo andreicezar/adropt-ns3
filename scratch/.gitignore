@@ -1,31 +1,8 @@
-# Build outputs
-*.o
-*.so
-*.a
-build/
-cmake-cache/
+# Ignore everything on scratch by default, except the provided examples
+/*
+!.gitignore
 
-# Log files
-*.log
-*.txt
-*.csv
-*.pcap
-*.tr
-
-# IDE files
-.vscode/
-.idea/
-*.swp
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Python
-__pycache__/
-*.pyc
-
-# Backup files
-*.backup
-*.bak
+!nested-subdir/
+!subdir/
+!scratch-simulator.cc
+!CMakeLists.txt

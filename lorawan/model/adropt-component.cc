@@ -1,6 +1,11 @@
+
+// =======================================================
+// CLEANED adropt-component.cc (OPTIMIZATION ONLY)
+// =======================================================
+
 /*
- * Simple ADRopt Component Implementation - Starting from scratch
- * Only uses basic LoRaWAN module information available by default
+ * ADRopt Component Implementation - Focused on optimization only
+ * Statistics collection is handled by StatisticsCollectorComponent
  */
 
 #include "adropt-component.h"
@@ -56,22 +61,10 @@ ADRoptComponent::GetTypeId()
                           UintegerValue(20),
                           MakeUintegerAccessor(&ADRoptComponent::m_payloadSize),
                           MakeUintegerChecker<uint8_t>(1, 255))
-            .AddTraceSource("NbTransChanged",
-                           "Trace fired when NbTrans parameter changes",
-                           MakeTraceSourceAccessor(&ADRoptComponent::m_nbTransChangedTrace),
-                           "ns3::TracedCallback::Uint32Uint8Uint8")
-            .AddTraceSource("TransmissionEfficiency",
-                           "Trace fired when transmission efficiency is updated",
-                           MakeTraceSourceAccessor(&ADRoptComponent::m_transmissionEfficiencyTrace),
-                           "ns3::TracedCallback::Uint32Double")
             .AddTraceSource("AdrAdjustment",
                            "Trace fired when ADR parameters are adjusted",
                            MakeTraceSourceAccessor(&ADRoptComponent::m_adrAdjustmentTrace),
-                           "ns3::TracedCallback::Uint32Uint8DoubleUint8")
-            .AddTraceSource("ErrorRate",
-                           "Trace fired when error rate is calculated",
-                           MakeTraceSourceAccessor(&ADRoptComponent::m_errorRateTrace),
-                           "ns3::TracedCallback::Uint32Uint32Uint32Double");
+                           "ns3::TracedCallback::Uint32Uint8DoubleUint8");
     return tid;
 }
 
@@ -82,7 +75,7 @@ ADRoptComponent::ADRoptComponent()
       m_payloadSize(20)
 {
     NS_LOG_FUNCTION(this);
-    NS_LOG_INFO("ADRopt Component initialized");
+    NS_LOG_INFO("ADRopt Component initialized (optimization only)");
 }
 
 ADRoptComponent::~ADRoptComponent()
@@ -104,98 +97,26 @@ ADRoptComponent::OnReceivedPacket(Ptr<const Packet> packet,
     }
     
     uint32_t deviceAddr = status->m_endDeviceAddress.Get();
-    NS_LOG_INFO("ADRopt: Received packet from device " << deviceAddr);
+    NS_LOG_DEBUG("ADRopt: Received packet from device " << deviceAddr);
 
-    // ADDED: Prevent duplicate processing by checking if this exact packet was already processed
+    // Prevent duplicate processing
     static std::map<uint32_t, Time> lastPacketTime;
     Time currentTime = Simulator::Now();
     
     if (lastPacketTime.find(deviceAddr) != lastPacketTime.end() && 
-        (currentTime - lastPacketTime[deviceAddr]).GetMicroSeconds() < 1000) // Within 1ms = duplicate
+        (currentTime - lastPacketTime[deviceAddr]).GetMicroSeconds() < 1000)
     {
         NS_LOG_DEBUG("ADRopt: Duplicate packet detected for device " << deviceAddr << ", skipping");
         return;
     }
     lastPacketTime[deviceAddr] = currentTime;
 
-    // ADDED: Track SF and TxPower distributions for this packet
-    auto& stats = m_packetTrackingStats[deviceAddr];
-    
-    // Get current SF and TxPower from device status
-    uint8_t currentSF = status->GetFirstReceiveWindowSpreadingFactor();
-    // REMOVED: uint8_t currentDR = SfToDr(currentSF); // Not used, causing compilation error
-    
-    double currentTxPower = 14.0; // Default EU868 max power
-    Ptr<EndDeviceLorawanMac> endDeviceMac = DynamicCast<EndDeviceLorawanMac>(status->GetMac());
-    if (endDeviceMac)
-    {
-        currentTxPower = endDeviceMac->GetTransmissionPowerDbm();
-    }
-    
-    // ADDED: Record SF and TxPower usage for this packet
-    stats.sfDistribution[currentSF]++;
-    stats.txPowerDistribution[static_cast<int>(currentTxPower)]++;
-    
-    NS_LOG_DEBUG("ADRopt: Device " << deviceAddr << " packet using SF" << static_cast<uint32_t>(currentSF) 
-                 << ", TxPower: " << currentTxPower << "dBm");
-
-    // Record network server reception (this is the final destination)
-    RecordNetworkServerReception(deviceAddr);
-    
-    // Extract gateway information from the received packet for diversity tracking
-    std::vector<uint32_t> receivingGateways;
-    auto receivedPacketList = status->GetReceivedPacketList();
-    if (!receivedPacketList.empty())
-    {
-        const auto& latestPacket = receivedPacketList.back().second;
-        for (const auto& gwPair : latestPacket.gwList)
-        {
-            // FIXED: Use the declared ExtractGatewayId method
-            uint32_t gwNodeId = ExtractGatewayId(gwPair.first);
-            receivingGateways.push_back(gwNodeId);
-        }
-        
-        NS_LOG_DEBUG("Packet received by " << receivingGateways.size() << " gateways");
-    }
-    
-    // Update per-gateway statistics for diversity analysis
-    for (uint32_t gwId : receivingGateways)
-    {
-        stats.perGatewayReceptions[gwId]++;
-    }
-    
-    // FIXED: Only count this as ONE successful reception regardless of gateway count
-    // The packet reached the network server, so it was successfully received
-    if (!receivingGateways.empty())
-    {
-        // This packet was received by at least one gateway and processed by network server
-        // We already incremented packetsReceivedByNetworkServer in RecordNetworkServerReception
-        // Now we need to ensure packetsReceivedByGateways is consistent
-        
-        // FIXED: Simply ensure consistency - both should be equal for successful NS receptions
-        stats.packetsReceivedByGateways = stats.packetsReceivedByNetworkServer;
-    }
-
-    // Update device statistics for ADR processing
+    // Update device statistics for ADR processing ONLY
     auto& deviceStats = m_deviceStats[deviceAddr];
     deviceStats.totalPackets++;
-    deviceStats.successfulTransmissions++;
-    deviceStats.lastUpdateTime = Simulator::Now();
-    
-    // Estimate transmission attempts for this packet based on current NbTrans
-    deviceStats.totalTransmissionAttempts += deviceStats.currentNbTrans;
-    
-    // Update transmission efficiency
-    double oldEfficiency = deviceStats.averageTransmissionsPerPacket;
-    deviceStats.averageTransmissionsPerPacket = CalculateTransmissionEfficiency(deviceStats);
-    
-    // Fire trace if efficiency changed significantly
-    if (std::abs(oldEfficiency - deviceStats.averageTransmissionsPerPacket) > 0.01)
-    {
-        m_transmissionEfficiencyTrace(deviceAddr, deviceStats.averageTransmissionsPerPacket);
-    }
 
     // Get the latest received packet info for ADR processing
+    auto receivedPacketList = status->GetReceivedPacketList();
     if (!receivedPacketList.empty())
     {
         const auto& latestPacket = receivedPacketList.back().second;
@@ -212,57 +133,12 @@ ADRoptComponent::OnReceivedPacket(Ptr<const Packet> packet,
         NS_LOG_DEBUG("ADRopt: No packet list available for device " << deviceAddr);
     }
 
-    // Recalculate error rates with corrected logic
-    CalculateErrorRates(deviceAddr);
-
     NS_LOG_DEBUG("ADRopt: Device " << deviceAddr 
                  << " - Packets: " << deviceStats.totalPackets
                  << ", NbTrans: " << static_cast<uint32_t>(deviceStats.currentNbTrans)
-                 << ", Efficiency: " << deviceStats.averageTransmissionsPerPacket
-                 << ", History: " << deviceStats.packetHistory.size()
-                 << ", SF: " << static_cast<uint32_t>(currentSF)
-                 << ", TxPower: " << currentTxPower << "dBm");
+                 << ", History: " << deviceStats.packetHistory.size());
 }
 
-uint32_t
-ADRoptComponent::ExtractGatewayId(const Address& gwAddr)
-{
-    try 
-    {
-        uint8_t addressLength = gwAddr.GetLength();
-        if (addressLength >= 4)
-        {
-            uint8_t buffer[16];
-            gwAddr.CopyTo(buffer);
-            
-            if (addressLength == 4)
-            {
-                return (buffer[3] << 24) | (buffer[2] << 16) | (buffer[1] << 8) | buffer[0];
-            }
-            else if (addressLength == 6)
-            {
-                return (buffer[5] << 8) | buffer[4];
-            }
-            else
-            {
-                int offset = addressLength - 4;
-                return (buffer[offset+3] << 24) | (buffer[offset+2] << 16) | 
-                       (buffer[offset+1] << 8) | buffer[offset];
-            }
-        }
-        else
-        {
-            uint8_t buffer[4] = {0};
-            gwAddr.CopyTo(buffer);
-            return (buffer[1] << 8) | buffer[0];
-        }
-    }
-    catch (...)
-    {
-        static uint32_t fallbackId = 1000;
-        return fallbackId++;
-    }
-}
 void
 ADRoptComponent::BeforeSendingReply(Ptr<EndDeviceStatus> status,
                                    Ptr<NetworkStatus> networkStatus)
@@ -286,7 +162,7 @@ ADRoptComponent::BeforeSendingReply(Ptr<EndDeviceStatus> status,
         return;
     }
 
-    // Parse packet to check ADR bit - be careful with packet modification
+    // Parse packet to check ADR bit
     try 
     {
         Ptr<Packet> packet = lastPacket->Copy();
@@ -383,8 +259,6 @@ ADRoptComponent::BeforeSendingReply(Ptr<EndDeviceStatus> status,
         // Clear history to start fresh cycle
         deviceStats.packetHistory.clear();
         
-        // Print current statistics for this device
-        PrintDeviceTransmissionStats(deviceAddr);
     }
     else
     {
@@ -399,11 +273,9 @@ ADRoptComponent::OnFailedReply(Ptr<EndDeviceStatus> status,
 {
     NS_LOG_FUNCTION(this << status->m_endDeviceAddress);
     NS_LOG_WARN("ADRopt: Failed reply for device " << status->m_endDeviceAddress.Get());
-    // Could implement retry logic here
 }
 
-// Transmission tracking methods implementation
-
+// Basic getters for simulation compatibility
 uint8_t
 ADRoptComponent::GetCurrentNbTrans(uint32_t deviceAddr) const
 {
@@ -413,28 +285,6 @@ ADRoptComponent::GetCurrentNbTrans(uint32_t deviceAddr) const
         return it->second.currentNbTrans;
     }
     return 1; // Default value
-}
-
-double
-ADRoptComponent::GetTransmissionEfficiency(uint32_t deviceAddr) const
-{
-    auto it = m_deviceStats.find(deviceAddr);
-    if (it != m_deviceStats.end())
-    {
-        return it->second.averageTransmissionsPerPacket;
-    }
-    return 1.0; // Default efficiency
-}
-
-uint32_t
-ADRoptComponent::GetTotalTransmissionAttempts(uint32_t deviceAddr) const
-{
-    auto it = m_deviceStats.find(deviceAddr);
-    if (it != m_deviceStats.end())
-    {
-        return it->second.totalTransmissionAttempts;
-    }
-    return 0;
 }
 
 uint32_t
@@ -449,67 +299,19 @@ ADRoptComponent::GetAdrAdjustmentCount(uint32_t deviceAddr) const
 }
 
 void
-ADRoptComponent::PrintTransmissionStatistics() const
-{
-    NS_LOG_INFO("=== ADRopt Transmission Statistics ===");
-    for (const auto& pair : m_deviceStats)
-    {
-        PrintDeviceTransmissionStats(pair.first);
-    }
-}
-
-void
-ADRoptComponent::PrintDeviceTransmissionStats(uint32_t deviceAddr) const
-{
-    auto it = m_deviceStats.find(deviceAddr);
-    if (it == m_deviceStats.end())
-    {
-        NS_LOG_INFO("No statistics available for device " << deviceAddr);
-        return;
-    }
-    
-    const DeviceStats& stats = it->second;
-    NS_LOG_INFO("Device " << deviceAddr << " Transmission Stats:");
-    NS_LOG_INFO("  Current NbTrans: " << static_cast<uint32_t>(stats.currentNbTrans));
-    NS_LOG_INFO("  Previous NbTrans: " << static_cast<uint32_t>(stats.previousNbTrans));
-    NS_LOG_INFO("  Total Packets: " << stats.totalPackets);
-    NS_LOG_INFO("  Total Transmission Attempts: " << stats.totalTransmissionAttempts);
-    NS_LOG_INFO("  Successful Transmissions: " << stats.successfulTransmissions);
-    NS_LOG_INFO("  ADR Adjustments: " << stats.adrAdjustmentCount);
-    NS_LOG_INFO("  Transmission Efficiency: " << stats.averageTransmissionsPerPacket);
-    NS_LOG_INFO("  Last NbTrans Change: " << stats.lastNbTransChange.As(Time::S));
-}
-
-void
 ADRoptComponent::UpdateTransmissionStats(uint32_t deviceAddr, uint8_t newNbTrans, uint8_t oldNbTrans)
 {
     auto& stats = m_deviceStats[deviceAddr];
-    stats.previousNbTrans = oldNbTrans;
     stats.currentNbTrans = newNbTrans;
     stats.lastNbTransChange = Simulator::Now();
     stats.adrAdjustmentCount++;
-    
-    // Fire trace
-    m_nbTransChangedTrace(deviceAddr, oldNbTrans, newNbTrans);
     
     NS_LOG_INFO("Device " << deviceAddr << " NbTrans updated: " 
                 << static_cast<uint32_t>(oldNbTrans) << " -> " 
                 << static_cast<uint32_t>(newNbTrans));
 }
 
-double
-ADRoptComponent::CalculateTransmissionEfficiency(const DeviceStats& stats) const
-{
-    if (stats.successfulTransmissions == 0)
-    {
-        return 1.0; // No data available
-    }
-    
-    return static_cast<double>(stats.totalTransmissionAttempts) / stats.successfulTransmissions;
-}
-
-// Core ADR algorithm and other existing methods...
-
+// Core ADR optimization algorithm
 bool
 ADRoptComponent::RunADRoptAlgorithm(uint8_t* newDataRate,
                                    double* newTxPowerDbm,
@@ -803,243 +605,6 @@ ADRoptComponent::GetMeanSNRForGateway(const Address& gwAddr, Ptr<EndDeviceStatus
     
     double sum = std::accumulate(snrValues.begin(), snrValues.end(), 0.0);
     return sum / snrValues.size();
-}
-
-void
-ADRoptComponent::RecordPacketTransmission(uint32_t deviceAddr)
-{
-    NS_LOG_FUNCTION(this << deviceAddr);
-    
-    auto& stats = m_packetTrackingStats[deviceAddr];
-    stats.totalPacketsSent++;
-    
-    Time now = Simulator::Now();
-    if (stats.firstPacketTime == Time::Max())
-    {
-        stats.firstPacketTime = now;
-    }
-    stats.lastPacketTime = now;
-    
-    NS_LOG_DEBUG("Device " << deviceAddr << " transmission recorded. Total sent: " << stats.totalPacketsSent);
-}
-
-void
-ADRoptComponent::RecordGatewayReception(uint32_t deviceAddr, const std::vector<uint32_t>& receivingGateways)
-{
-    // REMOVED: This method should not be called from OnReceivedPacket anymore
-    // Gateway reception tracking is now handled directly in OnReceivedPacket
-    NS_LOG_FUNCTION(this << deviceAddr << receivingGateways.size());
-    
-    auto& stats = m_packetTrackingStats[deviceAddr];
-    
-    if (!receivingGateways.empty())
-    {
-        stats.packetsReceivedByGateways++;
-        
-        // Track per-gateway receptions
-        for (uint32_t gwId : receivingGateways)
-        {
-            stats.perGatewayReceptions[gwId]++;
-        }
-        
-        NS_LOG_DEBUG("Device " << deviceAddr << " packet received by " << receivingGateways.size() 
-                     << " gateways. Total received: " << stats.packetsReceivedByGateways);
-    }
-    
-    // Recalculate error rates
-    CalculateErrorRates(deviceAddr);
-}
-
-void
-ADRoptComponent::RecordNetworkServerReception(uint32_t deviceAddr)
-{
-    NS_LOG_FUNCTION(this << deviceAddr);
-    
-    auto& stats = m_packetTrackingStats[deviceAddr];
-    stats.packetsReceivedByNetworkServer++;
-    
-    NS_LOG_DEBUG("Device " << deviceAddr << " packet processed by network server. Total: " 
-                 << stats.packetsReceivedByNetworkServer);
-    
-    // Recalculate error rates
-    CalculateErrorRates(deviceAddr);
-}
-
-void
-ADRoptComponent::CalculateErrorRates(uint32_t deviceAddr)
-{
-    NS_LOG_FUNCTION(this << deviceAddr);
-    
-    auto& stats = m_packetTrackingStats[deviceAddr];
-    
-    // Ensure consistency: packets received by gateways should equal network server reception
-    // since OnReceivedPacket only fires when network server processes a packet
-    if (stats.packetsReceivedByNetworkServer > 0)
-    {
-        stats.packetsReceivedByGateways = stats.packetsReceivedByNetworkServer;
-    }
-    
-    // Device to Gateway Error Rate
-    if (stats.totalPacketsSent > 0)
-    {
-        stats.deviceToGatewayErrorRate = 
-            static_cast<double>(stats.totalPacketsSent - stats.packetsReceivedByGateways) / 
-            stats.totalPacketsSent;
-    }
-    
-    // Gateway to Network Server Error Rate (should be 0 in this simulation)
-    stats.gatewayToNetworkServerErrorRate = 0.0; // Always 0 since we only count successful NS receptions
-    
-    // End-to-End Error Rate
-    if (stats.totalPacketsSent > 0)
-    {
-        stats.endToEndErrorRate = 
-            static_cast<double>(stats.totalPacketsSent - stats.packetsReceivedByNetworkServer) / 
-            stats.totalPacketsSent;
-    }
-    
-    // Fire trace
-    m_errorRateTrace(deviceAddr, stats.totalPacketsSent, stats.packetsReceivedByNetworkServer, 
-                     stats.endToEndErrorRate);
-    
-    NS_LOG_DEBUG("Device " << deviceAddr << " error rates - "
-                 << "Device->GW: " << (stats.deviceToGatewayErrorRate * 100) << "%, "
-                 << "GW->NS: " << (stats.gatewayToNetworkServerErrorRate * 100) << "%, "
-                 << "End-to-End: " << (stats.endToEndErrorRate * 100) << "%");
-}
-
-ADRoptComponent::PacketTrackingStats
-ADRoptComponent::GetPacketTrackingStats(uint32_t deviceAddr) const
-{
-    auto it = m_packetTrackingStats.find(deviceAddr);
-    if (it != m_packetTrackingStats.end())
-    {
-        return it->second;
-    }
-    return PacketTrackingStats(); // Return default empty stats
-}
-
-void
-ADRoptComponent::PrintPacketTrackingStatistics() const
-{
-    NS_LOG_INFO("=== Comprehensive Packet Tracking Statistics ===");
-    
-    uint32_t totalDevices = m_packetTrackingStats.size();
-    uint32_t totalSent = 0;
-    uint32_t totalReceivedGW = 0;
-    uint32_t totalReceivedNS = 0;
-    
-    for (const auto& pair : m_packetTrackingStats)
-    {
-        totalSent += pair.second.totalPacketsSent;
-        totalReceivedGW += pair.second.packetsReceivedByGateways;
-        totalReceivedNS += pair.second.packetsReceivedByNetworkServer;
-        PrintDevicePacketTrackingStats(pair.first);
-    }
-    
-    // Network-wide statistics
-    NS_LOG_INFO("=== Network-Wide Packet Statistics ===");
-    NS_LOG_INFO("Total Devices: " << totalDevices);
-    NS_LOG_INFO("Total Packets Sent: " << totalSent);
-    NS_LOG_INFO("Total Received by Gateways: " << totalReceivedGW);
-    NS_LOG_INFO("Total Processed by Network Server: " << totalReceivedNS);
-    
-    if (totalSent > 0)
-    {
-        double networkWideErrorRate = static_cast<double>(totalSent - totalReceivedNS) / totalSent;
-        NS_LOG_INFO("Network-Wide Error Rate: " << (networkWideErrorRate * 100) << "%");
-        NS_LOG_INFO("Network-Wide PDR: " << ((1.0 - networkWideErrorRate) * 100) << "%");
-    }
-}
-
-void
-ADRoptComponent::PrintDevicePacketTrackingStats(uint32_t deviceAddr) const
-{
-    auto it = m_packetTrackingStats.find(deviceAddr);
-    if (it == m_packetTrackingStats.end())
-    {
-        NS_LOG_INFO("No packet tracking statistics available for device " << deviceAddr);
-        return;
-    }
-    
-    const PacketTrackingStats& stats = it->second;
-    
-    NS_LOG_INFO("=== Device " << deviceAddr << " Comprehensive Packet Tracking ===");
-    NS_LOG_INFO("  Total Packets Sent: " << stats.totalPacketsSent);
-    NS_LOG_INFO("  Received by Gateways: " << stats.packetsReceivedByGateways);
-    NS_LOG_INFO("  Processed by Network Server: " << stats.packetsReceivedByNetworkServer);
-    
-    NS_LOG_INFO("  Device -> Gateway Error Rate: " << (stats.deviceToGatewayErrorRate * 100) << "%");
-    NS_LOG_INFO("  Gateway -> Network Server Error Rate: " << (stats.gatewayToNetworkServerErrorRate * 100) << "%");
-    NS_LOG_INFO("  End-to-End Error Rate: " << (stats.endToEndErrorRate * 100) << "%");
-    NS_LOG_INFO("  Packet Delivery Rate: " << ((1.0 - stats.endToEndErrorRate) * 100) << "%");
-    
-    // ADDED: Spreading Factor Distribution
-    if (!stats.sfDistribution.empty())
-    {
-        NS_LOG_INFO("  📡 Spreading Factor Distribution:");
-        uint32_t totalSFPackets = 0;
-        for (const auto& sfPair : stats.sfDistribution)
-        {
-            totalSFPackets += sfPair.second;
-        }
-        
-        for (const auto& sfPair : stats.sfDistribution)
-        {
-            double percentage = (static_cast<double>(sfPair.second) / totalSFPackets) * 100;
-            NS_LOG_INFO("    SF" << static_cast<uint32_t>(sfPair.first) << ": " 
-                       << sfPair.second << " packets (" << std::fixed << std::setprecision(1) 
-                       << percentage << "%)");
-        }
-    }
-    
-    // ADDED: TX Power Distribution
-    if (!stats.txPowerDistribution.empty())
-    {
-        NS_LOG_INFO("  ⚡ TX Power Distribution:");
-        uint32_t totalPowerPackets = 0;
-        for (const auto& powerPair : stats.txPowerDistribution)
-        {
-            totalPowerPackets += powerPair.second;
-        }
-        
-        for (const auto& powerPair : stats.txPowerDistribution)
-        {
-            double percentage = (static_cast<double>(powerPair.second) / totalPowerPackets) * 100;
-            NS_LOG_INFO("    " << powerPair.first << "dBm: " 
-                       << powerPair.second << " packets (" << std::fixed << std::setprecision(1) 
-                       << percentage << "%)");
-        }
-    }
-    
-    // Per-gateway reception statistics
-    if (!stats.perGatewayReceptions.empty())
-    {
-        NS_LOG_INFO("  🌐 Per-Gateway Receptions:");
-        for (const auto& gwPair : stats.perGatewayReceptions)
-        {
-            if (stats.packetsReceivedByNetworkServer > 0)
-            {
-                double gatewayReceptionRate = static_cast<double>(gwPair.second) / stats.packetsReceivedByNetworkServer;
-                NS_LOG_INFO("    Gateway " << gwPair.first << ": " << gwPair.second 
-                           << " packets (" << std::fixed << std::setprecision(1) 
-                           << (gatewayReceptionRate * 100) << "%)");
-            }
-        }
-    }
-    
-    // Timing information
-    if (stats.firstPacketTime != Time::Max() && stats.packetsReceivedByNetworkServer > 0)
-    {
-        double durationSeconds = (stats.lastPacketTime - stats.firstPacketTime).GetSeconds();
-        NS_LOG_INFO("  ⏱️  Duration: " << durationSeconds << " seconds");
-        if (durationSeconds > 0)
-        {
-            double packetsPerHour = (stats.packetsReceivedByNetworkServer * 3600.0) / durationSeconds;
-            NS_LOG_INFO("  📊 Reception Rate: " << std::fixed << std::setprecision(1) 
-                       << packetsPerHour << " packets/hour");
-        }
-    }
 }
 
 } // namespace lorawan

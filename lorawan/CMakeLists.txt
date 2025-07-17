@@ -39,6 +39,7 @@ set(source_files
     model/hex-grid-position-allocator.cc
     model/adropt-component.cc
     model/rssi-snir-tracker.cc
+    model/statistics-collector.cc
     helper/lora-radio-energy-model-helper.cc
     helper/lora-helper.cc
     helper/lora-phy-helper.cc
@@ -91,6 +92,7 @@ set(header_files
     model/hex-grid-position-allocator.h
     model/adropt-component.h
     model/rssi-snir-tracker.h
+    model/statistics-collector.h
     helper/lora-radio-energy-model-helper.h
     helper/lora-helper.h
     helper/lora-phy-helper.h
