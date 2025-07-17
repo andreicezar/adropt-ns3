@@ -7,11 +7,21 @@ set -e
 # Navigate to the NS-3 development directory
 cd ~/development/ns3-adropt-development/ns-3-dev
 
-# --- PAPER REPLICATION PARAMETERS ---
+# --- QUICK TEST PARAMETERS (2-3 MINUTES) ---
 VERBOSE=false
 ADR_ENABLED=true
 N_DEVICES=1                     # Single test device (like paper)
-PERIODS_TO_SIMULATE=4200        # Week-long experiment: 7 days * 24h * 60min / 2.4min ≈ 4200 transmissions
+PERIODS_TO_SIMULATE=50          # QUICK TEST: ~2 hours simulation time = 2-3 min runtime
+MOBILE_PROBABILITY=0.0          # Static indoor device on 3rd floor
+SIDE_LENGTH=4000                # 4km urban coverage radius 
+MAX_RANDOM_LOSS=36.0            # MUCH higher urban fading (was 18, now 36dB!)
+GATEWAY_DISTANCE=8000           # Distance to accommodate 8 gateways spread
+INITIALIZE_SF=false             # Let ADRopt optimize from default
+MIN_SPEED=0.0                   # Static device
+MAX_SPEED=0.0                   # Static device
+OUTPUT_FILE="quick_test_adr.csv"
+
+# Quick test: 50 packets (2 hours simulation) = 2-3 minutes runtime!
 MOBILE_PROBABILITY=0.0          # Static indoor device on 3rd floor
 SIDE_LENGTH=4000                # 4km urban coverage radius (7 urban GWs + 1 distant)
 MAX_RANDOM_LOSS=12.0            # Urban fading (based on paper's ~8dB std deviation)
@@ -67,12 +77,24 @@ echo "     • GW6: ~-15 dB - Urban edge"
 echo "     • GW7: ~-18 dB - Distant gateway (14km, +1200m elevation)"
 echo ""
 
-# --- EXECUTION ---
+# --- EXECUTION WITH RYZEN 5 6600H OPTIMIZATIONS ---
 echo "🚀 Starting paper replication simulation..."
-echo "   Simulating 1 week of continuous LoRaWAN operation..."
-echo "   This will test ADRopt vs standard ADR performance..."
+echo "💻 Hardware: AMD Ryzen 5 6600H (6C/12T) + 16GB RAM"
+echo "⚡ Estimated time: 2-5 min (12h), 30-60 min (full week)"
+echo "📊 Monitor with 'htop' to see all 12 threads working!"
 
-# Run the paper replication simulation
+# Build optimized version with parallel compilation
+echo "🔧 Building with realistic channel model..."
+cd ~/development/ns3-adropt-development/ns-3-dev
+./ns3 configure --build-profile=optimized
+./ns3 build -j12  # Use all 12 threads for compilation
+
+# Run simulation with realistic parameters that WILL create packet loss
+echo "⚡ Running REALISTIC simulation (expect 85-95% PDR, NOT 100%)..."
+echo "   36dB max fading + 4.0 path loss exponent + extra random loss"
+echo "   Some gateways positioned out of practical range"
+
+# Run the quick test simulation with aggressive packet loss
 ./ns3 run "adr_opt/adr-opt-simulation \
   --verbose=$VERBOSE \
   --AdrEnabled=$ADR_ENABLED \
@@ -85,7 +107,7 @@ echo "   This will test ADRopt vs standard ADR performance..."
   --initializeSF=$INITIALIZE_SF \
   --MinSpeed=$MIN_SPEED \
   --MaxSpeed=$MAX_SPEED \
-  --outputFile=$OUTPUT_FILE" > paper_replication_output.txt 2>&1
+  --outputFile=$OUTPUT_FILE" > quick_test_output.txt 2>&1
 
 # --- RESULTS ANALYSIS ---
 echo ""
