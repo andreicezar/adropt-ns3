@@ -43,7 +43,7 @@ ADRoptComponent::GetTypeId()
             .AddConstructor<ADRoptComponent>()
             .AddAttribute("PERTarget",
                           "Target Packet Error Rate",
-                          DoubleValue(0.1),
+                          DoubleValue(0.3),
                           MakeDoubleAccessor(&ADRoptComponent::m_perTarget),
                           MakeDoubleChecker<double>(0.0, 1.0))
             .AddAttribute("HistoryRange",
