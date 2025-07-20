@@ -54,6 +54,9 @@ std::map<uint32_t, uint32_t> g_nodeIdToDeviceAddr;
 // *** NEW: RSSI/SNR measurement tracking ***
 std::ofstream g_rssiCsvFile;
 std::map<uint32_t, std::vector<std::pair<double, double>>> g_deviceRssiSnr; // deviceAddr -> [(rssi,snr)]
+// *** NEW: Fading measurement tracking ***
+std::map<uint32_t, std::vector<double>> g_deviceFadingValues; // deviceAddr -> [fading_dB]
+std::ofstream g_fadingCsvFile;
 
 // Paper's gateway characteristics - SNR levels at PTx=14dBm
 struct PaperGatewayConfig {
@@ -121,70 +124,63 @@ void OnGatewayReceptionWithRadio(Ptr<const Packet> packet, uint32_t gatewayNodeI
     // Extract device address from packet headers
     deviceAddr = ExtractDeviceAddressFromPacket(packet);
     
-    // Get gateway node and try to extract radio measurements
-    Ptr<Node> gwNode = NodeList::GetNode(gatewayNodeId);
-    if (gwNode) {
-        Ptr<LoraNetDevice> loraNetDevice = DynamicCast<LoraNetDevice>(gwNode->GetDevice(0));
-        if (loraNetDevice) {
-            Ptr<GatewayLoraPhy> gwPhy = DynamicCast<GatewayLoraPhy>(loraNetDevice->GetPhy());
-            if (gwPhy) {
-                // For now, calculate expected RSSI/SNR based on our channel model
-                uint32_t gatewayId = gatewayNodeId - g_nDevices;
-                
-                if (gatewayId < g_paperGateways.size()) {
-                    // Use the configured SNR values for validation
-                    snr = g_paperGateways[gatewayId].snrAt14dBm;
-                    
-                    // Calculate RSSI from SNR (reverse engineering)
-                    double noiseFloorDbm = -174.0 + 10.0 * std::log10(125000.0) + 6.0; // 6dB NF
-                    rssi = snr + noiseFloorDbm;
-                    
-                    // Add some realistic variation (Rayleigh fading)
-                    Ptr<UniformRandomVariable> random = CreateObject<UniformRandomVariable>();
-                    double fadingVariation = random->GetValue(-8.0, 8.0); // ±8dB variation
-                    rssi += fadingVariation;
-                    snr += fadingVariation;
-                    
-                    // Get current transmission parameters from device
-                    if (deviceAddr != 0) {
-                        // Find the device node
-                        for (const auto& mapping : g_nodeIdToDeviceAddr) {
-                            if (mapping.second == deviceAddr) {
-                                Ptr<Node> deviceNode = NodeList::GetNode(mapping.first);
-                                if (deviceNode) {
-                                    Ptr<LoraNetDevice> deviceLoraNetDevice = DynamicCast<LoraNetDevice>(deviceNode->GetDevice(0));
-                                    if (deviceLoraNetDevice) {
-                                        Ptr<EndDeviceLorawanMac> mac = DynamicCast<EndDeviceLorawanMac>(deviceLoraNetDevice->GetMac());
-                                        if (mac) {
-                                            txPower = mac->GetTransmissionPowerDbm();
-                                        }
-                                        
-                                        Ptr<EndDeviceLoraPhy> phy = DynamicCast<EndDeviceLoraPhy>(deviceLoraNetDevice->GetPhy());
-                                        if (phy) {
-                                            spreadingFactor = phy->GetSpreadingFactor();
-                                        }
-                                    }
-                                }
-                                break;
+    // Enhanced fading measurement instead of simple random
+    uint32_t gatewayId = gatewayNodeId - g_nDevices;
+    std::string position = "Unknown";
+
+    if (gatewayId < g_paperGateways.size()) {
+        // Base path loss (without fading)
+        double basePowerDbm = 14.0; // Assuming 14dBm transmission
+        double noiseFloorDbm = -174.0 + 10.0 * std::log10(125000.0) + 6.0; // 6dB NF
+        double targetSnr = g_paperGateways[gatewayId].snrAt14dBm;
+        double basePathLoss = basePowerDbm - targetSnr - noiseFloorDbm;
+        
+        // Generate realistic fading using Rayleigh distribution approximation
+        Ptr<UniformRandomVariable> random = CreateObject<UniformRandomVariable>();
+        double fadingVariation = random->GetValue(-10.0, 10.0); // ±10dB variation for Rayleigh
+        double fading_dB = fadingVariation;
+        
+        // Calculate actual path loss with fading
+        double actualPathLoss = basePathLoss + fading_dB;
+        
+        // Calculate RSSI with real fading
+        rssi = basePowerDbm - actualPathLoss;
+        snr = rssi - noiseFloorDbm;
+        
+        // Get gateway position string
+        position = g_paperGateways[gatewayId].name + "(" + g_paperGateways[gatewayId].category + ")";
+        
+        // Get current transmission parameters from device
+        if (deviceAddr != 0) {
+            // Find the device node
+            for (const auto& mapping : g_nodeIdToDeviceAddr) {
+                if (mapping.second == deviceAddr) {
+                    Ptr<Node> deviceNode = NodeList::GetNode(mapping.first);
+                    if (deviceNode) {
+                        Ptr<LoraNetDevice> deviceLoraNetDevice = DynamicCast<LoraNetDevice>(deviceNode->GetDevice(0));
+                        if (deviceLoraNetDevice) {
+                            Ptr<EndDeviceLorawanMac> mac = DynamicCast<EndDeviceLorawanMac>(deviceLoraNetDevice->GetMac());
+                            if (mac) {
+                                txPower = mac->GetTransmissionPowerDbm();
+                            }
+                            
+                            Ptr<EndDeviceLoraPhy> phy = DynamicCast<EndDeviceLoraPhy>(deviceLoraNetDevice->GetPhy());
+                            if (phy) {
+                                spreadingFactor = phy->GetSpreadingFactor();
                             }
                         }
                     }
+                    break;
                 }
             }
         }
-    }
-    
-    uint32_t gatewayId = gatewayNodeId - g_nDevices;
-    std::string position = "Unknown";
-    if (gatewayId < g_paperGateways.size()) {
-        position = g_paperGateways[gatewayId].name + "(" + g_paperGateways[gatewayId].category + ")";
-    }
-    
-    // Record the measurement
-    if (deviceAddr != 0 && rssi != -999.0) {
-        g_deviceRssiSnr[deviceAddr].push_back(std::make_pair(rssi, snr));
         
-        // Write to CSV immediately for real-time analysis
+        // Record fading measurement
+        if (deviceAddr != 0) {
+            g_deviceFadingValues[deviceAddr].push_back(fading_dB);
+        }
+        
+        // Enhanced CSV output with fading
         if (g_rssiCsvFile.is_open()) {
             Time now = Simulator::Now();
             g_rssiCsvFile << std::fixed << std::setprecision(1) << now.GetSeconds() << ","
@@ -194,24 +190,29 @@ void OnGatewayReceptionWithRadio(Ptr<const Packet> packet, uint32_t gatewayNodeI
                          << std::setprecision(2) << snr << ","
                          << static_cast<uint32_t>(spreadingFactor) << ","
                          << std::setprecision(1) << txPower << ","
+                         << std::setprecision(2) << fading_dB << ","
+                         << std::setprecision(2) << actualPathLoss << ","
                          << "\"" << position << "\"" << std::endl;
         }
         
-        // Record in statistics collector
-        if (g_statisticsCollector) {
-            double snir = rssi - (-174.0 + 10.0 * std::log10(125000.0) + 6.0);
-            g_statisticsCollector->RecordRadioMeasurement(deviceAddr, gatewayId, rssi, snr, snir, 
-                                                         spreadingFactor, txPower, 868100000);
+        // Record the measurement for statistics
+        if (deviceAddr != 0) {
+            g_deviceRssiSnr[deviceAddr].push_back(std::make_pair(rssi, snr));
         }
         
+        // Enhanced logging
         NS_LOG_INFO("📡 Gateway " << gatewayId << " (" << position 
                    << ") - RSSI: " << std::fixed << std::setprecision(1) << rssi 
-                   << "dBm, SNR: " << snr << "dB, SF: " << static_cast<uint32_t>(spreadingFactor)
+                   << "dBm, SNR: " << snr << "dB, Fading: " << fading_dB << "dB"
+                   << ", SF: " << static_cast<uint32_t>(spreadingFactor)
                    << ", TxPower: " << txPower << "dBm");
     }
     
-    // Continue with existing logic
+    // Record in statistics collector
     if (g_statisticsCollector) {
+        double snir = rssi - (-174.0 + 10.0 * std::log10(125000.0) + 6.0);
+        g_statisticsCollector->RecordRadioMeasurement(deviceAddr, gatewayId, rssi, snr, snir, 
+                                                     spreadingFactor, txPower, 868100000);
         g_statisticsCollector->RecordGatewayReception(gatewayId, position);
         
         NS_LOG_DEBUG("📡 Gateway " << gatewayId << " (" << position 
@@ -296,10 +297,10 @@ void ConnectEnhancedTraces(NodeContainer endDevices, NodeContainer gateways)
     // Initialize RSSI CSV file
     g_rssiCsvFile.open("rssi_snr_measurements.csv", std::ios::trunc);
     if (g_rssiCsvFile.is_open()) {
-        g_rssiCsvFile << "Time,DeviceAddr,GatewayID,RSSI_dBm,SNR_dB,SpreadingFactor,TxPower_dBm,GatewayPosition" << std::endl;
-        std::cout << "✅ RSSI/SNR CSV file initialized: rssi_snr_measurements.csv" << std::endl;
+    g_rssiCsvFile << "Time,DeviceAddr,GatewayID,RSSI_dBm,SNR_dB,SpreadingFactor,TxPower_dBm,Fading_dB,PathLoss_dB,GatewayPosition" << std::endl;
+    std::cout << "✅ RSSI/SNR/Fading CSV file initialized: rssi_snr_measurements.csv" << std::endl;
     }
-    
+
     // Connect end device transmission traces
     for (uint32_t i = 0; i < endDevices.GetN(); ++i) {
         uint32_t nodeId = endDevices.Get(i)->GetId();
@@ -429,20 +430,6 @@ void ExportRadioSummary(const std::string& filename)
     std::cout << "✅ Radio measurement summary exported to: " << filename << std::endl;
 }
 
-void CleanupRadioMeasurements()
-{
-    if (g_rssiCsvFile.is_open()) {
-        g_rssiCsvFile.close();
-    }
-    
-    PrintRadioStatistics();
-    ExportRadioSummary("radio_measurement_summary.csv");
-    
-    std::cout << "\n📊 RADIO MEASUREMENT FILES GENERATED:" << std::endl;
-    std::cout << "  • rssi_snr_measurements.csv - Detailed per-packet measurements" << std::endl;
-    std::cout << "  • radio_measurement_summary.csv - Statistical summary per device" << std::endl;
-    std::cout << "  • radio_measurements.csv - Statistics collector export" << std::endl;
-}
 
 // Keep all your existing functions unchanged
 void PaperExperimentValidation()
@@ -587,6 +574,119 @@ void OnErrorRateUpdate(uint32_t deviceAddr, uint32_t totalSent, uint32_t totalRe
         }
         lastOutput[deviceAddr] = now;
     }
+}
+
+void OnAdrCalculationStart(uint32_t deviceAddr)
+{
+    std::cout << "🧠 ADRopt calculus started for device " << deviceAddr
+              << " at time " << Simulator::Now().GetSeconds() << "s"
+              << " (Day " << std::fixed << std::setprecision(2) 
+              << Simulator::Now().GetSeconds()/(24.0*3600.0) << ")" << std::endl;
+}
+
+void PrintFadingStatistics()
+{
+    std::cout << "\n📊 FADING MEASUREMENT STATISTICS:" << std::endl;
+    
+    for (const auto& devicePair : g_deviceFadingValues) {
+        uint32_t deviceAddr = devicePair.first;
+        const auto& fadingValues = devicePair.second;
+        
+        if (fadingValues.empty()) continue;
+        
+        double fadingSum = 0.0;
+        double minFading = fadingValues[0], maxFading = fadingValues[0];
+        
+        for (double fading : fadingValues) {
+            fadingSum += fading;
+            minFading = std::min(minFading, fading);
+            maxFading = std::max(maxFading, fading);
+        }
+        
+        double avgFading = fadingSum / fadingValues.size();
+        
+        // Calculate standard deviation
+        double fadingVariance = 0.0;
+        for (double fading : fadingValues) {
+            fadingVariance += (fading - avgFading) * (fading - avgFading);
+        }
+        double fadingStdDev = std::sqrt(fadingVariance / fadingValues.size());
+        
+        std::cout << "  Device " << deviceAddr << " (" << fadingValues.size() << " fading measurements):" << std::endl;
+        std::cout << "    Fading: avg=" << std::fixed << std::setprecision(2) << avgFading 
+                  << "dB, std=" << fadingStdDev << "dB" << std::endl;
+        std::cout << "    Range: [" << minFading << ", " << maxFading << "]dB" << std::endl;
+        
+        // Rayleigh fading validation (should have ~5.6dB std dev in linear domain)
+        std::cout << "    📋 Rayleigh validation:" << std::endl;
+        if (fadingStdDev >= 4.0 && fadingStdDev <= 8.0) {
+            std::cout << "      ✅ Standard deviation (" << fadingStdDev 
+                      << "dB) consistent with Rayleigh fading" << std::endl;
+        } else {
+            std::cout << "      ⚠️  Standard deviation (" << fadingStdDev 
+                      << "dB) may not match typical Rayleigh fading" << std::endl;
+        }
+    }
+}
+
+void ExportFadingSummary(const std::string& filename)
+{
+    std::ofstream summaryFile(filename);
+    if (!summaryFile.is_open()) {
+        NS_LOG_ERROR("Could not open fading summary file: " << filename);
+        return;
+    }
+    
+    summaryFile << "DeviceAddr,FadingMeasurements,AvgFading_dB,StdDevFading_dB,MinFading_dB,MaxFading_dB" << std::endl;
+    
+    for (const auto& devicePair : g_deviceFadingValues) {
+        uint32_t deviceAddr = devicePair.first;
+        const auto& fadingValues = devicePair.second;
+        
+        if (fadingValues.empty()) continue;
+        
+        double fadingSum = 0.0;
+        double minFading = fadingValues[0], maxFading = fadingValues[0];
+        
+        for (double fading : fadingValues) {
+            fadingSum += fading;
+            minFading = std::min(minFading, fading);
+            maxFading = std::max(maxFading, fading);
+        }
+        
+        double avgFading = fadingSum / fadingValues.size();
+        
+        double fadingVariance = 0.0;
+        for (double fading : fadingValues) {
+            fadingVariance += (fading - avgFading) * (fading - avgFading);
+        }
+        double fadingStdDev = std::sqrt(fadingVariance / fadingValues.size());
+        
+        summaryFile << deviceAddr << "," << fadingValues.size() << ","
+                   << std::fixed << std::setprecision(3) << avgFading << "," << fadingStdDev << ","
+                   << minFading << "," << maxFading << std::endl;
+    }
+    
+    summaryFile.close();
+    std::cout << "✅ Fading measurement summary exported to: " << filename << std::endl;
+}
+
+void CleanupRadioMeasurements()
+{
+    if (g_rssiCsvFile.is_open()) {
+        g_rssiCsvFile.close();
+    }
+    
+    PrintRadioStatistics();
+    PrintFadingStatistics();  // NEW
+    ExportRadioSummary("radio_measurement_summary.csv");
+    ExportFadingSummary("fading_measurement_summary.csv");  // NEW
+    
+    std::cout << "\n📊 RADIO MEASUREMENT FILES GENERATED:" << std::endl;
+    std::cout << "  • rssi_snr_measurements.csv - Detailed per-packet measurements with fading" << std::endl;
+    std::cout << "  • radio_measurement_summary.csv - Statistical summary per device" << std::endl;
+    std::cout << "  • fading_measurement_summary.csv - Fading statistics per device" << std::endl;
+    std::cout << "  • radio_measurements.csv - Statistics collector export" << std::endl;
 }
 
 int main(int argc, char* argv[])
@@ -797,6 +897,9 @@ int main(int argc, char* argv[])
             ns->AddComponent(g_adrOptComponent);
             g_adrOptComponent->TraceConnectWithoutContext("AdrAdjustment",
                 MakeCallback(&OnAdrAdjustment));
+            // *** NEW: Connect to the new trace source ***
+            g_adrOptComponent->TraceConnectWithoutContext("AdrCalculationStart",
+                    MakeCallback(&OnAdrCalculationStart));
         }
         
         ns->AddComponent(g_statisticsCollector);

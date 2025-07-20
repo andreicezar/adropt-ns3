@@ -108,7 +108,10 @@ private:
     // Device state tracking (for optimization only)
     std::map<uint32_t, DeviceStats> m_deviceStats;
     std::map<uint32_t, uint8_t> m_deviceNbTrans;
-
+    // Trace sources for optimization events
+    
+    // *** NEW: Trace source for ADR calculation start ***
+    TracedCallback<uint32_t> m_adrCalculationTrace;
     // Trace sources for optimization events
     TracedCallback<uint32_t, uint8_t, double, uint8_t> m_adrAdjustmentTrace;
 

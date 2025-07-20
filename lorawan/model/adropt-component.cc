@@ -64,7 +64,11 @@ ADRoptComponent::GetTypeId()
             .AddTraceSource("AdrAdjustment",
                            "Trace fired when ADR parameters are adjusted",
                            MakeTraceSourceAccessor(&ADRoptComponent::m_adrAdjustmentTrace),
-                           "ns3::TracedCallback::Uint32Uint8DoubleUint8");
+                           "ns3::TracedCallback::Uint32Uint8DoubleUint8")
+            .AddTraceSource("AdrCalculationStart",
+                           "Trace fired when the ADRopt calculus begins",
+                           MakeTraceSourceAccessor(&ADRoptComponent::m_adrCalculationTrace),
+                           "ns3::TracedCallback::Uint32");
     return tid;
 }
 
@@ -206,7 +210,9 @@ ADRoptComponent::BeforeSendingReply(Ptr<EndDeviceStatus> status,
                      << ", need " << m_historyRange << ")");
         return;
     }
-
+    // *** NEW: Fire the trace to signal calculation start ***
+    NS_LOG_INFO("ADRopt: History full, starting ADR calculation for device " << deviceAddr);
+    m_adrCalculationTrace(deviceAddr);
     // Get current NbTrans for tracking
     uint8_t oldNbTrans = deviceStats.currentNbTrans;
 
