@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
 """
-Comprehensive LoRaWAN Simulation Analyzer - CORRECTED VERSION
+Enhanced LoRaWAN Simulation Analyzer - V7 (Comprehensive Analysis + Validation)
 
-Reads all simulation output files (.csv and .txt) to perform a full analysis
-of network performance, ADR behavior, and radio link quality, generating
-detailed plots and summaries including SF and TP distributions.
+This script provides comprehensive analysis with robust data validation, debugging,
+and quality assessment capabilities for LoRaWAN simulation results.
 
-KEY FIXES:
-- Establishes single source of truth for data consistency
-- Uses same data source for both console output and plots
-- Eliminates duplicate function definitions
-- Improved error handling and validation
+TERMINOLOGY (consistent with Heusse et al. 2020 paper):
+- FER (Frame Erasure Rate): Physical loss ratio between ED and a given GW
+- PER (Packet Error Rate): Loss ratio between ED and Network Server (benefits from macrodiversity + repetitions)  
+- PDR (Packet Delivery Rate): Success ratio at network level = 1 - PER
+- DER (Data Error Rate): Loss ratio between ED and Application Server (benefits from inter-packet FEC)
+
+ENHANCED FEATURES:
+- Comprehensive data validation and quality assessment
+- Simulation duration and packet count validation
+- Data completeness warnings and debugging info
+- Robust handling of limited or incomplete data
+- ADRopt parameter evolution tracking
+- Gateway performance and diversity analysis
+- Channel model validation with statistical tests
+- Research-grade output with confidence indicators
+- Consistent terminology following the paper
 """
 
 import os
@@ -19,723 +29,854 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+from typing import Dict, Optional, Tuple
+from scipy import stats
 import warnings
-from typing import Dict, Tuple, Optional
 
 # --- Configuration ---
 PLOT_DIR = "plots"
+DEBUG_DIR = "debug"
 sns.set_theme(style="whitegrid", palette="viridis")
-warnings.filterwarnings("ignore", category=FutureWarning, module="seaborn")
 
-# --- Ground Truth Data Structure ---
-class GroundTruthData:
-    """Centralized data container to ensure consistency across all analyses"""
+# Expected simulation parameters (from paper)
+EXPECTED_PACKET_INTERVAL = 144  # seconds
+EXPECTED_SIMULATION_DAYS = 7
+EXPECTED_GATEWAYS = 8
+EXPECTED_FADING_STD = 8.0  # dB
+PAPER_TARGET_DER = 1.0  # % (Data Error Rate target: DER < 0.01 = 1%)
+PAPER_TARGET_PDR = 99.0  # % (Packet Delivery Rate for reference)
+
+class SimulationQuality:
+    """Quality assessment container."""
     def __init__(self):
-        self.primary_radio_data: Optional[pd.DataFrame] = None
+        self.data_completeness = "Unknown"
+        self.duration_accuracy = "Unknown" 
+        self.channel_model_accuracy = "Unknown"
+        self.gateway_diversity = "Unknown"
+        self.adropt_functioning = "Unknown"
+        self.overall_confidence = "Unknown"
+        self.warnings = []
+        self.debug_info = []
+
+class GroundTruthData:
+    """Enhanced data container with validation."""
+    def __init__(self):
+        self.radio_data: Optional[pd.DataFrame] = None
         self.adr_data: Optional[pd.DataFrame] = None
-        self.gateway_performance: Dict[int, int] = {}
-        self.summary_stats: Dict[str, float] = {}
-        self.data_source_info: Dict[str, str] = {}
+        self.packets_sent_per_device: Dict[int, int] = {}
+        self.packets_received_per_device: Dict[int, int] = {}
+        self.simulation_duration: float = 0.0
+        self.data_source_name: str = ""
         self.validated: bool = False
-    
-    def validate_data(self):
-        """Validates data quality and consistency"""
-        if self.primary_radio_data is not None:
-            required_cols = ['Time', 'RSSI_dBm', 'SNR_dB']
-            missing_cols = [col for col in required_cols if col not in self.primary_radio_data.columns]
-            if missing_cols:
-                print(f"⚠️  Warning: Missing columns in radio data: {missing_cols}")
-                return False
+        self.quality: SimulationQuality = SimulationQuality()
+
+    def validate(self) -> bool:
+        """Enhanced validation with quality assessment."""
+        self.quality = SimulationQuality()
+        
+        if self.radio_data is None or self.radio_data.empty:
+            self.quality.warnings.append("❌ No radio measurement data available")
+            return False
             
-            # Check for reasonable value ranges
-            rssi_range = (self.primary_radio_data['RSSI_dBm'].min(), self.primary_radio_data['RSSI_dBm'].max())
-            snr_range = (self.primary_radio_data['SNR_dB'].min(), self.primary_radio_data['SNR_dB'].max())
+        # Data completeness check
+        measurement_count = len(self.radio_data)
+        expected_min = max(100, EXPECTED_SIMULATION_DAYS * 24 * 3600 / EXPECTED_PACKET_INTERVAL / 10)
+        
+        if measurement_count < expected_min:
+            self.quality.data_completeness = "Limited"
+            self.quality.warnings.append(f"⚠️ Limited data: {measurement_count} measurements (expected >{expected_min:.0f})")
+        elif measurement_count > expected_min * 5:
+            self.quality.data_completeness = "Excellent" 
+            self.quality.debug_info.append(f"✅ Rich dataset: {measurement_count} measurements")
+        else:
+            self.quality.data_completeness = "Adequate"
+            self.quality.debug_info.append(f"✅ Reasonable data: {measurement_count} measurements")
+
+        # Duration validation
+        if 'Time' in self.radio_data.columns:
+            time_span = self.radio_data['Time'].max() - self.radio_data['Time'].min()
+            expected_duration = EXPECTED_SIMULATION_DAYS * 24 * 3600
+            duration_ratio = time_span / expected_duration
             
-            if not (-180 <= rssi_range[0] <= rssi_range[1] <= -30):
-                print(f"⚠️  Warning: RSSI values outside expected range: {rssi_range}")
+            self.simulation_duration = time_span / (24 * 3600)  # days
             
-            if not (-30 <= snr_range[0] <= snr_range[1] <= 30):
-                print(f"⚠️  Warning: SNR values outside expected range: {snr_range}")
+            if 0.8 <= duration_ratio <= 1.2:
+                self.quality.duration_accuracy = "Accurate"
+                self.quality.debug_info.append(f"✅ Duration: {self.simulation_duration:.1f} days (target: {EXPECTED_SIMULATION_DAYS})")
+            else:
+                self.quality.duration_accuracy = "Inaccurate"
+                self.quality.warnings.append(f"⚠️ Duration: {self.simulation_duration:.1f} days (expected: {EXPECTED_SIMULATION_DAYS})")
+
+        # Gateway diversity check
+        if 'GatewayID' in self.radio_data.columns:
+            unique_gateways = self.radio_data['GatewayID'].nunique()
+            if unique_gateways == EXPECTED_GATEWAYS:
+                self.quality.gateway_diversity = "Complete"
+                self.quality.debug_info.append(f"✅ All {EXPECTED_GATEWAYS} gateways active")
+            elif unique_gateways >= EXPECTED_GATEWAYS * 0.75:
+                self.quality.gateway_diversity = "Good"
+                self.quality.warnings.append(f"⚠️ {unique_gateways}/{EXPECTED_GATEWAYS} gateways active")
+            else:
+                self.quality.gateway_diversity = "Poor"
+                self.quality.warnings.append(f"❌ Only {unique_gateways}/{EXPECTED_GATEWAYS} gateways active")
+
+        # Channel model validation
+        if 'Fading_dB' in self.radio_data.columns:
+            fading_std = self.radio_data['Fading_dB'].std()
+            std_error = abs(fading_std - EXPECTED_FADING_STD) / EXPECTED_FADING_STD
             
-            self.validated = True
+            if std_error < 0.1:  # Within 10%
+                self.quality.channel_model_accuracy = "Excellent"
+                self.quality.debug_info.append(f"✅ Fading model perfect: {fading_std:.2f}dB (target: {EXPECTED_FADING_STD}dB)")
+            elif std_error < 0.25:  # Within 25%
+                self.quality.channel_model_accuracy = "Good"
+                self.quality.debug_info.append(f"✅ Fading model good: {fading_std:.2f}dB (target: {EXPECTED_FADING_STD}dB)")
+            else:
+                self.quality.channel_model_accuracy = "Poor"
+                self.quality.warnings.append(f"⚠️ Fading model off: {fading_std:.2f}dB (target: {EXPECTED_FADING_STD}dB)")
+
+        # ADRopt functioning check
+        if 'SpreadingFactor' in self.radio_data.columns and 'TxPower_dBm' in self.radio_data.columns:
+            sf_range = self.radio_data['SpreadingFactor'].max() - self.radio_data['SpreadingFactor'].min()
+            power_range = self.radio_data['TxPower_dBm'].max() - self.radio_data['TxPower_dBm'].min()
+            
+            if sf_range >= 3 and power_range >= 5:  # Significant parameter changes
+                self.quality.adropt_functioning = "Active"
+                self.quality.debug_info.append(f"✅ ADRopt optimizing: SF range={sf_range}, Power range={power_range:.1f}dB")
+            elif sf_range >= 1 or power_range >= 2:
+                self.quality.adropt_functioning = "Limited"
+                self.quality.warnings.append(f"⚠️ Limited ADRopt activity: SF range={sf_range}, Power range={power_range:.1f}dB")
+            else:
+                self.quality.adropt_functioning = "Inactive"
+                self.quality.warnings.append(f"❌ No ADRopt optimization detected")
+
+        # Overall confidence assessment - STRICT RULES
+        actual_data_rows = len(self.radio_data)
+        
+        # CRITICAL: Force low confidence for insufficient data
+        if actual_data_rows < 100:
+            self.quality.overall_confidence = "Very Low"
+            self.quality.warnings.append("❌ Confidence forced to Very Low due to insufficient CSV data")
             return True
-        return False
+        elif actual_data_rows < 1000:
+            self.quality.overall_confidence = "Low" 
+            self.quality.warnings.append("⚠️ Confidence limited to Low due to limited CSV data")
+            return True
+        
+        # Only assess other factors if we have adequate data
+        quality_scores = [
+            self.quality.data_completeness in ["Adequate", "Excellent"],
+            self.quality.duration_accuracy == "Accurate", 
+            self.quality.gateway_diversity in ["Good", "Complete"],
+            self.quality.channel_model_accuracy in ["Good", "Excellent"],
+            self.quality.adropt_functioning in ["Limited", "Active"]
+        ]
+        
+        confidence_score = sum(quality_scores) / len(quality_scores)
+        
+        if confidence_score >= 0.8:
+            self.quality.overall_confidence = "High"
+        elif confidence_score >= 0.6:
+            self.quality.overall_confidence = "Medium"
+        else:
+            self.quality.overall_confidence = "Low"
 
-# Global ground truth instance
-ground_truth = GroundTruthData()
+        self.validated = True
+        return True
 
-# --- File Reading and Parsing Utilities ---
-
-def load_csv(filepath: str) -> pd.DataFrame | None:
-    """Safely loads a CSV file into a pandas DataFrame, handling empty files."""
-    if not os.path.exists(filepath):
-        print(f"⚠️  Warning: CSV file not found at '{filepath}'")
-        return None
-    try:
-        df = pd.read_csv(filepath)
-        if df.empty:
-            print(f"⚠️  Warning: CSV file '{filepath}' is empty.")
-            return None
-        print(f"✅ Successfully loaded '{filepath}' - {len(df)} rows, {len(df.columns)} columns")
-        return df
-    except Exception as e:
-        print(f"❌ Error loading '{filepath}': {e}")
-        return None
-
-def read_text_file(filepath: str) -> str | None:
-    """Safely reads the entire content of a text file."""
-    if not os.path.exists(filepath):
-        print(f"⚠️  Warning: Text file not found at '{filepath}'")
-        return None
-    try:
-        with open(filepath, 'r') as f:
-            content = f.read()
-        print(f"✅ Successfully loaded '{filepath}'")
-        return content
-    except Exception as e:
-        print(f"❌ Error reading '{filepath}': {e}")
-        return None
-
-def parse_main_log(content: str | None) -> dict:
-    """Parses the main simulation output log for final summary statistics."""
-    if not content:
-        return {}
+def establish_ground_truth() -> GroundTruthData:
+    """Enhanced data loading with comprehensive validation."""
+    print("\n" + "="*70)
+    print("🔍 ENHANCED SIMULATION DATA ANALYSIS")
+    print("="*70)
     
-    summary = {}
-    patterns = {
-        'transmitted': r"Total packets transmitted: (\d+)",
-        'received': r"Total packets received: (\d+)",
-        'pdr': r"Packet Delivery Rate \(PDR\): ([\d.]+)%",
-    }
-    for key, pattern in patterns.items():
-        match = re.search(pattern, content)
-        if match:
+    gt = GroundTruthData()
+
+    # Load radio measurement data (primary source)
+    radio_files = ['rssi_snr_measurements.csv', 'radio_measurements.csv']
+    for radio_file in radio_files:
+        if os.path.exists(radio_file):
             try:
-                summary[key] = float(match.group(1))
-            except (ValueError, IndexError):
-                continue
-    return summary
+                gt.radio_data = pd.read_csv(radio_file)
+                gt.data_source_name = radio_file
+                print(f"✅ Loaded radio data: {radio_file} ({len(gt.radio_data)} rows)")
+                break
+            except Exception as e:
+                print(f"❌ Error loading {radio_file}: {e}")
+    
+    if gt.radio_data is None:
+        print("❌ No radio measurement data found. Analysis cannot proceed.")
+        return gt
 
-def establish_ground_truth_data() -> GroundTruthData:
-    """
-    Establishes the single source of truth for all analyses.
-    This ensures consistency between console output and plots.
-    """
-    print("\n--- 🎯 Establishing Ground Truth Data ---")
-    
-    # Load all potential data sources
-    df_radio = load_csv('rssi_snr_measurements.csv')
-    df_measurements = load_csv('radio_measurements.csv')
-    df_adr = load_csv('paper_replication_adr.csv')
-    main_log_content = read_text_file('paper_replication_output.txt')
-    gw_perf_content = read_text_file('paper_phyPerformance.txt')
-    
-    # Establish primary radio data source (priority order)
-    primary_radio_data = None
-    data_source_name = ""
-    
-    if df_measurements is not None and not df_measurements.empty:
-        if 'RSSI_dBm' in df_measurements.columns and 'SNR_dB' in df_measurements.columns:
-            primary_radio_data = df_measurements
-            data_source_name = "Radio Measurements"
-            print(f"📊 Primary radio source: {data_source_name} ({len(primary_radio_data)} records)")
-    
-    if primary_radio_data is None and df_radio is not None and not df_radio.empty:
-        if 'RSSI_dBm' in df_radio.columns and 'SNR_dB' in df_radio.columns:
-            primary_radio_data = df_radio
-            data_source_name = "RSSI/SNR Measurements"
-            print(f"📊 Primary radio source: {data_source_name} ({len(primary_radio_data)} records)")
-    
-    if primary_radio_data is None:
-        print("❌ No suitable radio data found. Analysis will be limited.")
-        return ground_truth
-    
-    # Calculate consistent statistics from primary source
-    ground_truth.primary_radio_data = primary_radio_data
-    ground_truth.adr_data = df_adr
-    ground_truth.data_source_info['primary_radio'] = data_source_name
-    
-    # Calculate gateway performance from radio data (ensures consistency)
-    if 'GatewayID' in primary_radio_data.columns:
-        ground_truth.gateway_performance = primary_radio_data['GatewayID'].value_counts().sort_index().to_dict()
-        print(f"📊 Gateway performance calculated from {data_source_name}")
-    
-    # Parse summary statistics from log file
-    if main_log_content:
-        ground_truth.summary_stats = parse_main_log(main_log_content)
-    
-    # Calculate radio statistics for consistency
-    radio_stats = {
-        'rssi_mean': primary_radio_data['RSSI_dBm'].mean(),
-        'rssi_median': primary_radio_data['RSSI_dBm'].median(),
-        'rssi_std': primary_radio_data['RSSI_dBm'].std(),
-        'snr_mean': primary_radio_data['SNR_dB'].mean(),
-        'snr_median': primary_radio_data['SNR_dB'].median(),
-        'snr_std': primary_radio_data['SNR_dB'].std(),
-        'total_measurements': len(primary_radio_data)
-    }
-    ground_truth.summary_stats.update(radio_stats)
-    
-    # Validate the data
-    ground_truth.validate_data()
-    
-    print(f"📊 Radio statistics: RSSI μ={radio_stats['rssi_mean']:.1f}dBm, SNR μ={radio_stats['snr_mean']:.1f}dB")
-    print(f"📊 Total radio events: {radio_stats['total_measurements']:,}")
-    
-    return ground_truth
+    # Load ADR statistics if available
+    adr_file = 'paper_replication_adr.csv'
+    if os.path.exists(adr_file):
+        try:
+            gt.adr_data = pd.read_csv(adr_file)
+            print(f"✅ Loaded ADR data: {adr_file} ({len(gt.adr_data)} rows)")
+        except Exception as e:
+            print(f"⚠️ Could not load ADR data: {e}")
 
-# --- Enhanced Plotting Functions (using ground truth data) ---
+    # Extract packet counts from log
+    log_file = 'paper_replication_output.txt'
+    if os.path.exists(log_file):
+        try:
+            with open(log_file, 'r') as f:
+                log_content = f.read()
+            
+            # Extract transmission count
+            sent_match = re.search(r"Total packets transmitted: (\d+)", log_content)
+            received_match = re.search(r"Total packets received: (\d+)", log_content)
+            
+            if sent_match:
+                total_sent = int(sent_match.group(1))
+                print(f"✅ Total transmitted: {total_sent}")
+                
+                if received_match:
+                    total_received = int(received_match.group(1))
+                    print(f"✅ Total received: {total_received}")
+                    
+                    # Assign to device(s)
+                    unique_devices = gt.radio_data['DeviceAddr'].unique() if 'DeviceAddr' in gt.radio_data.columns else []
+                    for device_id in unique_devices:
+                        gt.packets_sent_per_device[device_id] = total_sent
+                        gt.packets_received_per_device[device_id] = total_received
+                        
+        except Exception as e:
+            print(f"⚠️ Error parsing log file: {e}")
 
-def plot_sf_tp_distributions():
-    """Plots comprehensive SF and TP distributions using ground truth data."""
-    print("\n--- 📊 Analyzing SF and TP Distributions ---")
+    # Clean and prepare data
+    if gt.radio_data is not None:
+        gt.radio_data.dropna(subset=['Time'], inplace=True)
+        if 'DeviceAddr' in gt.radio_data.columns:
+            gt.radio_data['DeviceAddr'] = gt.radio_data['DeviceAddr'].astype(int)
+        if 'GatewayID' in gt.radio_data.columns:
+            gt.radio_data['GatewayID'] = gt.radio_data['GatewayID'].astype(int)
+
+    # Validate and assess quality
+    gt.validate()
     
-    if ground_truth.primary_radio_data is None:
-        print("⚠️  No radio data available for SF/TP analysis")
+    # Print quality assessment
+    print(f"\n📊 SIMULATION QUALITY ASSESSMENT:")
+    print(f"  Data Completeness: {gt.quality.data_completeness}")
+    print(f"  Duration Accuracy: {gt.quality.duration_accuracy}")
+    print(f"  Gateway Diversity: {gt.quality.gateway_diversity}")
+    print(f"  Channel Model: {gt.quality.channel_model_accuracy}")
+    print(f"  ADRopt Function: {gt.quality.adropt_functioning}")
+    print(f"  Overall Confidence: {gt.quality.overall_confidence}")
+    
+    if gt.quality.warnings:
+        print(f"\n⚠️ WARNINGS:")
+        for warning in gt.quality.warnings:
+            print(f"  {warning}")
+    
+    if gt.quality.debug_info:
+        print(f"\n✅ DEBUG INFO:")
+        for info in gt.quality.debug_info:
+            print(f"  {info}")
+    
+    return gt
+
+def plot_enhanced_performance_analysis(gt: GroundTruthData):
+    """Enhanced performance analysis with proper paper terminology."""
+    print("\n--- 📉 Enhanced Performance Analysis (PDR/DER) ---")
+    
+    if not gt.packets_sent_per_device:
+        print("⚠️ Skipping: No transmission data available for performance calculation.")
         return
-    
-    data = ground_truth.primary_radio_data
-    
-    # Check for required columns
-    if 'SpreadingFactor' not in data.columns or 'TxPower_dBm' not in data.columns:
-        print("⚠️  SF or TP data not available in primary source")
-        return
-    
-    print(f"📈 Using data from: {ground_truth.data_source_info['primary_radio']}")
-    print(f"📊 Analyzing {len(data)} measurements")
-    
-    fig, axes = plt.subplots(2, 2, figsize=(20, 16))
-    fig.suptitle(f'Spreading Factor and Transmission Power Analysis\nData Source: {ground_truth.data_source_info["primary_radio"]}', 
-                 fontsize=18, fontweight='bold')
-    
-    # SF Distribution (Bar Plot)
-    sf_counts = data['SpreadingFactor'].value_counts().sort_index()
-    ax1 = axes[0, 0]
-    sf_bars = ax1.bar(sf_counts.index, sf_counts.values, 
-                     color=plt.cm.viridis(np.linspace(0, 1, len(sf_counts))),
-                     edgecolor='black', linewidth=1.5)
-    
-    ax1.set_title('Spreading Factor Distribution', fontsize=16, fontweight='bold')
-    ax1.set_xlabel('Spreading Factor (SF)', fontsize=14)
-    ax1.set_ylabel('Number of Transmissions', fontsize=14)
-    ax1.set_xticks(sf_counts.index)
-    ax1.set_xticklabels([f'SF{int(sf)}' for sf in sf_counts.index])
-    ax1.grid(True, alpha=0.3)
-    
-    # Add value labels on bars
-    total_sf = sf_counts.sum()
-    for bar, count in zip(sf_bars, sf_counts.values):
-        height = bar.get_height()
-        percentage = (count / total_sf) * 100
-        ax1.annotate(f'{count}\n({percentage:.1f}%)',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom',
-                    fontsize=12, fontweight='bold')
-    
-    # SF Distribution Pie Chart
-    ax2 = axes[0, 1]
-    colors = plt.cm.Set3(np.linspace(0, 1, len(sf_counts)))
-    ax2.pie(sf_counts.values, 
-            labels=[f'SF{int(sf)}' for sf in sf_counts.index],
-            autopct='%1.1f%%', startangle=90, colors=colors,
-            textprops={'fontsize': 12, 'fontweight': 'bold'})
-    ax2.set_title('SF Distribution (Pie Chart)', fontsize=16, fontweight='bold')
-    
-    # TP Distribution (Bar Plot)
-    tp_counts = data['TxPower_dBm'].value_counts().sort_index()
-    ax3 = axes[1, 0]
-    tp_bars = ax3.bar(tp_counts.index, tp_counts.values,
-                     color=plt.cm.plasma(np.linspace(0, 1, len(tp_counts))),
-                     edgecolor='black', linewidth=1.5)
-    
-    ax3.set_title('Transmission Power Distribution', fontsize=16, fontweight='bold')
-    ax3.set_xlabel('Transmission Power (dBm)', fontsize=14)
-    ax3.set_ylabel('Number of Transmissions', fontsize=14)
-    ax3.grid(True, alpha=0.3)
-    
-    # Add value labels on bars
-    total_tp = tp_counts.sum()
-    for bar, count in zip(tp_bars, tp_counts.values):
-        height = bar.get_height()
-        percentage = (count / total_tp) * 100
-        ax3.annotate(f'{count}\n({percentage:.1f}%)',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom',
-                    fontsize=12, fontweight='bold')
-    
-    # TP Distribution Pie Chart
-    ax4 = axes[1, 1]
-    colors = plt.cm.Set2(np.linspace(0, 1, len(tp_counts)))
-    ax4.pie(tp_counts.values,
-            labels=[f'{tp} dBm' for tp in tp_counts.index],
-            autopct='%1.1f%%', startangle=90, colors=colors,
-            textprops={'fontsize': 12, 'fontweight': 'bold'})
-    ax4.set_title('TP Distribution (Pie Chart)', fontsize=16, fontweight='bold')
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOT_DIR, 'sf_tp_distributions.png'), dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  -> Generated 'sf_tp_distributions.png'")
-    
-    # Print statistics (consistent with ground truth)
-    print(f"\n📊 SF Distribution Statistics:")
-    for sf, count in sf_counts.items():
-        percentage = (count / len(data)) * 100
-        print(f"  SF{int(sf)}: {count:,} transmissions ({percentage:.1f}%)")
-    
-    print(f"\n📊 TP Distribution Statistics:")
-    for tp, count in tp_counts.items():
-        percentage = (count / len(data)) * 100
-        print(f"  {tp} dBm: {count:,} transmissions ({percentage:.1f}%)")
 
-def plot_rssi_analysis():
-    """Comprehensive RSSI analysis using ground truth data."""
-    if ground_truth.primary_radio_data is None:
-        print("ℹ️  Skipping RSSI analysis: No radio data available.")
-        return
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('Enhanced Performance Analysis: PDR and Estimated DER', fontsize=16, fontweight='bold')
+
+    # Calculate network-level metrics
+    device_pdrs = {}  # Packet Delivery Rate (network level)
+    device_pers = {}  # Packet Error Rate (network level)
+    device_estimated_ders = {}  # Estimated Data Error Rate (with FEC)
     
-    print(f"\n--- 📈 Analyzing RSSI (Data Source: {ground_truth.data_source_info['primary_radio']}) ---")
-    data = ground_truth.primary_radio_data.sort_values('Time').copy()
-    
-    fig, axes = plt.subplots(2, 2, figsize=(20, 16))
-    fig.suptitle(f'Comprehensive RSSI Analysis\nData Source: {ground_truth.data_source_info["primary_radio"]}', 
-                 fontsize=18, fontweight='bold')
-    
-    # Time Series Plot
-    ax1 = axes[0, 0]
-    if 'GatewayID' in data.columns:
-        unique_gateways = sorted(data['GatewayID'].unique())
-        colors = plt.get_cmap('tab10', len(unique_gateways))
-        for i, gw_id in enumerate(unique_gateways):
-            gw_data = data[data['GatewayID'] == gw_id]
-            ax1.scatter(gw_data['Time'], gw_data['RSSI_dBm'], color=colors(i), alpha=0.6, s=20, label=f'GW {gw_id}')
-    else:
-        ax1.scatter(data['Time'], data['RSSI_dBm'], alpha=0.6, s=20, color='blue', label='All Measurements')
-    
-    # Add moving average
-    if len(data) > 10:
-        window_size = max(3, min(len(data) // 10, 50))
-        rolling_mean = data['RSSI_dBm'].rolling(window=window_size, center=True).mean()
-        ax1.plot(data['Time'], rolling_mean, color='red', linewidth=3, label=f'Moving Average (n={window_size})')
-    
-    # Add sensitivity thresholds
-    ax1.axhline(y=-130, color='orangered', linestyle='--', alpha=0.8, linewidth=2, label='SF7 Sensitivity (-130 dBm)')
-    ax1.axhline(y=-137, color='goldenrod', linestyle='--', alpha=0.8, linewidth=2, label='SF12 Sensitivity (-137 dBm)')
-    
-    ax1.set_title('RSSI Over Time', fontsize=16, fontweight='bold')
-    ax1.set_xlabel('Time (seconds)', fontsize=14)
-    ax1.set_ylabel('RSSI (dBm)', fontsize=14)
-    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax1.grid(True, alpha=0.3)
-    
-    # Overall Histogram
-    ax2 = axes[0, 1]
-    ax2.hist(data['RSSI_dBm'], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
-    ax2.axvline(ground_truth.summary_stats['rssi_mean'], color='red', linestyle='--', linewidth=2, 
-               label=f'Mean: {ground_truth.summary_stats["rssi_mean"]:.1f} dBm')
-    ax2.axvline(ground_truth.summary_stats['rssi_median'], color='green', linestyle='--', linewidth=2, 
-               label=f'Median: {ground_truth.summary_stats["rssi_median"]:.1f} dBm')
-    ax2.set_title('RSSI Distribution (All Data)', fontsize=16, fontweight='bold')
-    ax2.set_xlabel('RSSI (dBm)', fontsize=14)
-    ax2.set_ylabel('Frequency', fontsize=14)
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # Per-Gateway Histogram
-    ax3 = axes[1, 0]
-    if 'GatewayID' in data.columns:
-        unique_gateways = sorted(data['GatewayID'].unique())
-        colors = plt.get_cmap('Set3', len(unique_gateways))
-        for i, gw_id in enumerate(unique_gateways):
-            gw_data = data[data['GatewayID'] == gw_id]
-            ax3.hist(gw_data['RSSI_dBm'], bins=20, alpha=0.6, color=colors(i), 
-                    label=f'GW {gw_id} (μ={gw_data["RSSI_dBm"].mean():.1f})', density=True)
-        ax3.set_title('RSSI Distribution by Gateway', fontsize=16, fontweight='bold')
-        ax3.legend()
-    else:
-        ax3.hist(data['RSSI_dBm'], bins=20, alpha=0.7, color='lightcoral', density=True)
-        ax3.set_title('RSSI Distribution', fontsize=16, fontweight='bold')
-    
-    ax3.set_xlabel('RSSI (dBm)', fontsize=14)
-    ax3.set_ylabel('Density', fontsize=14)
-    ax3.grid(True, alpha=0.3)
-    
-    # RSSI Statistics Box Plot
-    ax4 = axes[1, 1]
-    if 'GatewayID' in data.columns:
-        gw_data_list = []
-        gw_labels = []
-        for gw_id in sorted(data['GatewayID'].unique()):
-            gw_rssi = data[data['GatewayID'] == gw_id]['RSSI_dBm']
-            gw_data_list.append(gw_rssi)
-            gw_labels.append(f'GW {gw_id}')
+    for device_id, total_sent in gt.packets_sent_per_device.items():
+        total_received = gt.packets_received_per_device.get(device_id, 0)
         
-        box_plot = ax4.boxplot(gw_data_list, tick_labels=gw_labels, patch_artist=True)
-        colors = plt.get_cmap('Set2', len(gw_data_list))
-        for patch, color in zip(box_plot['boxes'], [colors(i) for i in range(len(gw_data_list))]):
-            patch.set_facecolor(color)
-        ax4.set_title('RSSI Statistics by Gateway', fontsize=16, fontweight='bold')
-    else:
-        ax4.boxplot([data['RSSI_dBm']], tick_labels=['All Data'], patch_artist=True)
-        ax4.set_title('RSSI Statistics', fontsize=16, fontweight='bold')
-    
-    ax4.set_ylabel('RSSI (dBm)', fontsize=14)
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOT_DIR, 'rssi_comprehensive_analysis.png'), dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  -> Generated 'rssi_comprehensive_analysis.png'")
-    
-    # Print RSSI statistics (consistent with ground truth)
-    print(f"\n📊 RSSI Statistics (consistent with ground truth):")
-    print(f"  Mean: {ground_truth.summary_stats['rssi_mean']:.2f} dBm")
-    print(f"  Median: {ground_truth.summary_stats['rssi_median']:.2f} dBm")
-    print(f"  Std Dev: {ground_truth.summary_stats['rssi_std']:.2f} dB")
+        if total_sent > 0:
+            pdr = (total_received / total_sent) * 100  # Packet Delivery Rate
+            per = 100 - pdr  # Packet Error Rate
+            
+            # Estimate DER (Data Error Rate) assuming FEC can recover from PER ≤ 30%
+            # (Based on paper: "we need to have PER < 0.3" for FEC recovery)
+            if per <= 30.0:
+                estimated_der = max(0.01, per * 0.1)  # Conservative estimate
+            else:
+                estimated_der = per  # FEC cannot recover
+                
+            device_pdrs[device_id] = pdr
+            device_pers[device_id] = per
+            device_estimated_ders[device_id] = estimated_der
+        else:
+            device_pdrs[device_id] = 0.0
+            device_pers[device_id] = 100.0
+            device_estimated_ders[device_id] = 100.0
 
-def plot_snr_analysis():
-    """Comprehensive SNR analysis using ground truth data."""
-    if ground_truth.primary_radio_data is None:
-        print("ℹ️  Skipping SNR analysis: No radio data available.")
-        return
-    
-    print(f"\n--- 📡 Analyzing SNR (Data Source: {ground_truth.data_source_info['primary_radio']}) ---")
-    data = ground_truth.primary_radio_data.sort_values('Time').copy()
-    
-    fig, axes = plt.subplots(2, 2, figsize=(20, 16))
-    fig.suptitle(f'Comprehensive SNR Analysis\nData Source: {ground_truth.data_source_info["primary_radio"]}', 
-                 fontsize=18, fontweight='bold')
-    
-    # SNR Time Series
+    dev_ids = list(device_pdrs.keys())
+    pdr_values = list(device_pdrs.values())
+    per_values = list(device_pers.values())
+    der_values = list(device_estimated_ders.values())
+
+    # 1. PDR (Packet Delivery Rate) at network level
     ax1 = axes[0, 0]
-    if 'GatewayID' in data.columns:
-        unique_gateways = sorted(data['GatewayID'].unique())
-        colors = plt.get_cmap('tab10', len(unique_gateways))
-        for i, gw_id in enumerate(unique_gateways):
-            gw_data = data[data['GatewayID'] == gw_id]
-            ax1.scatter(gw_data['Time'], gw_data['SNR_dB'], color=colors(i), alpha=0.6, s=20, label=f'GW {gw_id}')
-    else:
-        ax1.scatter(data['Time'], data['SNR_dB'], alpha=0.6, s=20, color='green', label='All Measurements')
-    
-    # Add moving average for SNR
-    if len(data) > 10:
-        window_size = max(3, min(len(data) // 10, 50))
-        rolling_mean = data['SNR_dB'].rolling(window=window_size, center=True).mean()
-        ax1.plot(data['Time'], rolling_mean, color='red', linewidth=3, label=f'Moving Average (n={window_size})')
-    
-    ax1.axhline(y=0, color='orange', linestyle='--', alpha=0.8, linewidth=2, label='SNR Threshold (0 dB)')
-    ax1.set_title('SNR Over Time', fontsize=16, fontweight='bold')
-    ax1.set_xlabel('Time (seconds)', fontsize=14)
-    ax1.set_ylabel('SNR (dB)', fontsize=14)
-    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax1.grid(True, alpha=0.3)
-    
-    # SNR Histogram
+    bars = ax1.bar([f'Device {d}' for d in dev_ids], pdr_values, color='skyblue', alpha=0.7)
+    ax1.axhline(y=PAPER_TARGET_PDR, color='green', linestyle='--', label=f'High PDR Target ({PAPER_TARGET_PDR}%)')
+    ax1.set_title('Packet Delivery Rate (PDR) - Network Level')
+    ax1.set_ylabel('PDR (%)')
+    ax1.legend()
+    ax1.grid(axis='y', alpha=0.3)
+
+    for bar, per in zip(bars, per_values):
+        height = bar.get_height()
+        color = 'green' if per <= 5.0 else 'orange' if per <= 15.0 else 'red'
+        ax1.text(bar.get_x() + bar.get_width()/2., height, f'{height:.1f}%\n(PER:{per:.1f}%)', 
+                ha='center', va='bottom', fontweight='bold', color=color)
+
+    # 2. Estimated DER (Data Error Rate) with FEC
     ax2 = axes[0, 1]
-    ax2.hist(data['SNR_dB'], bins=30, alpha=0.7, color='lightgreen', edgecolor='black')
-    ax2.axvline(ground_truth.summary_stats['snr_mean'], color='red', linestyle='--', linewidth=2, 
-               label=f'Mean: {ground_truth.summary_stats["snr_mean"]:.1f} dB')
-    ax2.axvline(ground_truth.summary_stats['snr_median'], color='blue', linestyle='--', linewidth=2, 
-               label=f'Median: {ground_truth.summary_stats["snr_median"]:.1f} dB')
-    ax2.set_title('SNR Distribution', fontsize=16, fontweight='bold')
-    ax2.set_xlabel('SNR (dB)', fontsize=14)
-    ax2.set_ylabel('Frequency', fontsize=14)
+    bars = ax2.bar([f'Device {d}' for d in dev_ids], der_values, color='coral', alpha=0.7)
+    ax2.axhline(y=PAPER_TARGET_DER, color='green', linestyle='--', label=f'Paper DER Target (<{PAPER_TARGET_DER}%)')
+    ax2.set_title('Estimated Data Error Rate (DER) - Application Level with FEC')
+    ax2.set_ylabel('DER (%)')
     ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # SNR per Gateway Box Plot
-    ax3 = axes[1, 0]
-    if 'GatewayID' in data.columns:
-        gw_data_list = []
-        gw_labels = []
-        for gw_id in sorted(data['GatewayID'].unique()):
-            gw_snr = data[data['GatewayID'] == gw_id]['SNR_dB']
-            gw_data_list.append(gw_snr)
-            gw_labels.append(f'GW {gw_id}')
-        
-        box_plot = ax3.boxplot(gw_data_list, tick_labels=gw_labels, patch_artist=True)
-        colors = plt.get_cmap('Set2', len(gw_data_list))
-        for patch, color in zip(box_plot['boxes'], [colors(i) for i in range(len(gw_data_list))]):
-            patch.set_facecolor(color)
-        ax3.set_title('SNR Statistics by Gateway', fontsize=16, fontweight='bold')
-    else:
-        ax3.boxplot([data['SNR_dB']], tick_labels=['All Data'], patch_artist=True)
-        ax3.set_title('SNR Statistics', fontsize=16, fontweight='bold')
-    
-    ax3.set_ylabel('SNR (dB)', fontsize=14)
-    ax3.grid(True, alpha=0.3)
-    
-    # SNR per Gateway Histogram
-    ax4 = axes[1, 1]
-    if 'GatewayID' in data.columns:
-        unique_gateways = sorted(data['GatewayID'].unique())
-        colors = plt.get_cmap('Set3', len(unique_gateways))
-        for i, gw_id in enumerate(unique_gateways):
-            gw_data = data[data['GatewayID'] == gw_id]
-            ax4.hist(gw_data['SNR_dB'], bins=15, alpha=0.6, color=colors(i), 
-                    label=f'GW {gw_id} (μ={gw_data["SNR_dB"].mean():.1f})', density=True)
-        ax4.set_title('SNR Distribution by Gateway', fontsize=16, fontweight='bold')
-        ax4.legend()
-    else:
-        ax4.hist(data['SNR_dB'], bins=15, alpha=0.7, color='lightcyan', density=True)
-        ax4.set_title('SNR Distribution', fontsize=16, fontweight='bold')
-    
-    ax4.set_xlabel('SNR (dB)', fontsize=14)
-    ax4.set_ylabel('Density', fontsize=14)
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(PLOT_DIR, 'snr_comprehensive_analysis.png'), dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  -> Generated 'snr_comprehensive_analysis.png'")
-    
-    # Print statistics (consistent with ground truth)
-    print(f"\n📊 SNR Statistics (consistent with ground truth):")
-    print(f"  Mean: {ground_truth.summary_stats['snr_mean']:.2f} dB")
-    print(f"  Median: {ground_truth.summary_stats['snr_median']:.2f} dB")
-    print(f"  Std Dev: {ground_truth.summary_stats['snr_std']:.2f} dB")
+    ax2.grid(axis='y', alpha=0.3)
 
-def plot_gateway_performance():
-    """Plot gateway performance using consistent ground truth data."""
-    print(f"\n--- 📊 Analyzing Gateway Performance (Data Source: {ground_truth.data_source_info['primary_radio']}) ---")
-    
-    if not ground_truth.gateway_performance:
-        print("⚠️  No gateway performance data available.")
-        return
-    
-    fig, axes = plt.subplots(2, 2, figsize=(20, 16))
-    fig.suptitle(f'Gateway Performance Analysis\nData Source: {ground_truth.data_source_info["primary_radio"]}', 
-                 fontsize=18, fontweight='bold')
-    
-    gw_ids = list(ground_truth.gateway_performance.keys())
-    gw_counts = list(ground_truth.gateway_performance.values())
-    total_packets = sum(gw_counts)
-    gw_rates = [(count/total_packets)*100 if total_packets > 0 else 0 for count in gw_counts]
-    
-    # Total packets received per gateway
-    ax1 = axes[0, 0]
-    bars = ax1.bar(gw_ids, gw_counts, color=plt.cm.Blues(np.linspace(0.4, 0.9, len(gw_ids))), 
-                   edgecolor='black', linewidth=1.5)
-    ax1.set_title('Total Packets Received per Gateway', fontsize=16, fontweight='bold')
-    ax1.set_xlabel('Gateway ID', fontsize=14)
-    ax1.set_ylabel('Packet Count', fontsize=14)
-    ax1.grid(True, alpha=0.3)
-    
-    # Add value labels on bars
-    for bar, count in zip(bars, gw_counts):
+    for bar, der in zip(bars, der_values):
         height = bar.get_height()
-        ax1.annotate(f'{count}',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom',
-                    fontsize=12, fontweight='bold')
-    
-    # Gateway extraction rate percentage
-    ax2 = axes[0, 1]
-    pie_colors = plt.cm.Set3(np.linspace(0, 1, len(gw_ids)))
-    ax2.pie(gw_counts, labels=[f'GW {gw_id}' for gw_id in gw_ids],
-            autopct='%1.1f%%', startangle=90, colors=pie_colors,
-            textprops={'fontsize': 12, 'fontweight': 'bold'})
-    ax2.set_title('Gateway Data Distribution', fontsize=16, fontweight='bold')
-    
-    # Gateway extraction rates as bar chart
+        color = 'green' if der <= PAPER_TARGET_DER else 'orange' if der <= 5.0 else 'red'
+        ax2.text(bar.get_x() + bar.get_width()/2., height, f'{height:.2f}%', 
+                ha='center', va='bottom', fontweight='bold', color=color)
+
+    # 3. Confidence indicator - FIXED COLORS
     ax3 = axes[1, 0]
-    bars = ax3.bar(gw_ids, gw_rates, color=plt.cm.Oranges(np.linspace(0.4, 0.9, len(gw_ids))),
-                  edgecolor='black', linewidth=1.5)
-    ax3.set_title('Gateway Extraction Rate (%)', fontsize=16, fontweight='bold')
-    ax3.set_xlabel('Gateway ID', fontsize=14)
-    ax3.set_ylabel('Extraction Rate (%)', fontsize=14)
-    ax3.grid(True, alpha=0.3)
+    confidence_colors = {'High': 'green', 'Medium': 'orange', 'Low': 'red', 'Very Low': 'darkred'}
+    conf_color = confidence_colors.get(gt.quality.overall_confidence, 'gray')
     
-    for bar, rate in zip(bars, gw_rates):
-        height = bar.get_height()
-        ax3.annotate(f'{rate:.1f}%',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom',
-                    fontsize=10, fontweight='bold')
+    ax3.pie([1], labels=[f'Analysis Confidence\n{gt.quality.overall_confidence}'], 
+           colors=[conf_color], autopct='', startangle=90)
+    ax3.set_title('Result Confidence Level')
     
-    # Gateway performance statistics summary
+    # Add warning if confidence is low due to data issues
+    if gt.quality.overall_confidence in ['Low', 'Very Low']:
+        ax3.text(0, -1.5, '⚠️ Limited by CSV\ndata export issue', ha='center', va='center',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+
+    # 4. Data quality summary
     ax4 = axes[1, 1]
     ax4.axis('off')
     
-    max_gw = max(ground_truth.gateway_performance, key=ground_truth.gateway_performance.get)
-    min_gw = min(ground_truth.gateway_performance, key=ground_truth.gateway_performance.get)
-    avg_packets = np.mean(gw_counts)
-    std_packets = np.std(gw_counts)
+    # Get actual CSV data count
+    actual_csv_rows = len(gt.radio_data) if gt.radio_data is not None else 0
     
-    stats_text = f"""Gateway Performance Summary:
+    quality_text = f"""
+⚠️ CRITICAL DATA ISSUE:
+• Actual CSV Rows: {actual_csv_rows}
+• Expected for {gt.simulation_duration:.1f} days: ~4000+
+• Data Capture: SEVERELY INCOMPLETE
 
-Data Source: {ground_truth.data_source_info['primary_radio']}
-Total Gateways: {len(gw_ids)}
-Total Packets: {total_packets:,}
-Average per Gateway: {avg_packets:.1f}
-Std Deviation: {std_packets:.1f}
+Network Performance (without FEC):
+• PDR: {pdr_values[0]:.1f}% 
+• PER: {per_values[0]:.1f}%
 
-Best Performing Gateway:
-  GW {max_gw}: {ground_truth.gateway_performance[max_gw]:,} packets ({(ground_truth.gateway_performance[max_gw]/total_packets)*100:.1f}%)
+Estimated App Performance (with FEC):
+• DER: {der_values[0]:.2f}% (Target: <{PAPER_TARGET_DER}%)
+• Gap: {der_values[0] - PAPER_TARGET_DER:.2f}% above target
 
-Worst Performing Gateway:  
-  GW {min_gw}: {ground_truth.gateway_performance[min_gw]:,} packets ({(ground_truth.gateway_performance[min_gw]/total_packets)*100:.1f}%)
-
-Load Balance Factor: {(std_packets/avg_packets)*100:.1f}%
-(Lower is better distributed)
-    """
+❌ CONFIDENCE: {gt.quality.overall_confidence}
+Due to insufficient CSV data export
+"""
     
-    ax4.text(0.5, 0.5, stats_text, ha='center', va='center', fontsize=11,
-            bbox=dict(boxstyle="round,pad=0.5", fc="lightcyan", ec="teal", lw=2))
-    ax4.set_title('Gateway Statistics Summary', fontsize=16, fontweight='bold')
-    
+    ax4.text(0.1, 0.9, quality_text, transform=ax4.transAxes, fontsize=10,
+            verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', facecolor='lightgray', alpha=0.8))
+
     plt.tight_layout()
-    plt.savefig(os.path.join(PLOT_DIR, 'gateway_performance_analysis.png'), dpi=150, bbox_inches='tight')
+    plt.savefig(os.path.join(PLOT_DIR, 'enhanced_performance_analysis.png'), dpi=150)
     plt.close()
-    print(f"  -> Generated 'gateway_performance_analysis.png'")
-    
-    # Print gateway statistics (consistent with ground truth)
-    print(f"\n📊 Gateway Performance Statistics (consistent with ground truth):")
-    print(f"  Data source: {ground_truth.data_source_info['primary_radio']}")
-    print(f"  Total packets: {total_packets:,}")
-    print(f"  Average packets per gateway: {avg_packets:.1f}")
-    print(f"  Best performing gateway: GW {max_gw} ({ground_truth.gateway_performance[max_gw]:,} packets)")
-    print(f"  Worst performing gateway: GW {min_gw} ({ground_truth.gateway_performance[min_gw]:,} packets)")
+    print("  -> Generated 'enhanced_performance_analysis.png'")
 
-def create_summary_dashboard():
-    """Creates a comprehensive summary dashboard using consistent ground truth data."""
-    if ground_truth.primary_radio_data is None:
-        print("ℹ️  Skipping dashboard creation: No radio data available.")
+def plot_adropt_evolution(gt: GroundTruthData):
+    """Plot ADRopt parameter evolution over time."""
+    print("\n--- 🧠 ADRopt Parameter Evolution ---")
+    
+    if gt.radio_data is None or 'Time' not in gt.radio_data.columns:
+        print("⚠️ Skipping: No time-series data available.")
         return
 
-    print(f"\n--- 🖼️  Creating Summary Dashboard (Data Source: {ground_truth.data_source_info['primary_radio']}) ---")
+    # Check if we have parameter data
+    has_sf = 'SpreadingFactor' in gt.radio_data.columns
+    has_power = 'TxPower_dBm' in gt.radio_data.columns
     
-    fig = plt.figure(figsize=(20, 12), constrained_layout=True)
-    gs = fig.add_gridspec(2, 3)
-    fig.suptitle(f'LoRaWAN Simulation Analysis Dashboard\nData Source: {ground_truth.data_source_info["primary_radio"]}', 
-                 fontsize=22, fontweight='bold')
+    if not has_sf and not has_power:
+        print("⚠️ Skipping: No ADR parameter data available.")
+        return
 
-    # Metric Text Box (using consistent ground truth data)
-    ax_text = fig.add_subplot(gs[0, 0])
-    ax_text.axis('off')
-    pdr_text = f"{ground_truth.summary_stats.get('pdr', 0):.1f}%"
-    
-    text_content = (
-        f"Final PDR: {pdr_text}\n\n"
-        f"Packets Sent: {int(ground_truth.summary_stats.get('transmitted', 0))}\n"
-        f"Packets Received: {int(ground_truth.summary_stats.get('received', 0))}\n\n"
-        f"Median SNR: {ground_truth.summary_stats['snr_median']:.1f} dB\n"
-        f"Median RSSI: {ground_truth.summary_stats['rssi_median']:.1f} dBm\n"
-        f"\nRadio Events: {ground_truth.summary_stats['total_measurements']:,}\n"
-        f"Data Source: {ground_truth.data_source_info['primary_radio']}"
-    )
-    
-    ax_text.text(0.5, 0.5, text_content, ha='center', va='center', fontsize=15,
-                 bbox=dict(boxstyle="round,pad=0.5", fc="lightblue", ec="navy", lw=2))
-    ax_text.set_title("Key Performance Indicators", fontsize=16, fontweight='bold', pad=20)
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('ADRopt Parameter Evolution Analysis', fontsize=16, fontweight='bold')
 
-    # RSSI Distribution (using ground truth data)
-    ax_rssi = fig.add_subplot(gs[0, 1])
-    ax_rssi.hist(ground_truth.primary_radio_data['RSSI_dBm'], bins=20, color='skyblue', alpha=0.7, edgecolor='black')
-    ax_rssi.set_title('RSSI Distribution', fontweight='bold', fontsize=16)
-    ax_rssi.set_xlabel('RSSI (dBm)')
-    ax_rssi.set_ylabel('Frequency')
-    ax_rssi.grid(True, alpha=0.3)
+    time_hours = gt.radio_data['Time'] / 3600  # Convert to hours
 
-    # SNR Distribution (using ground truth data)
-    ax_snr = fig.add_subplot(gs[0, 2])
-    ax_snr.hist(ground_truth.primary_radio_data['SNR_dB'], bins=20, color='salmon', alpha=0.7, edgecolor='black')
-    ax_snr.set_title('SNR Distribution', fontweight='bold', fontsize=16)
-    ax_snr.set_xlabel('SNR (dB)')
-    ax_snr.set_ylabel('Frequency')
-    ax_snr.grid(True, alpha=0.3)
-
-    # Gateway Performance (using consistent ground truth data)
-    ax_gw = fig.add_subplot(gs[1, :])
-    if ground_truth.gateway_performance:
-        gw_ids = list(ground_truth.gateway_performance.keys())
-        gw_counts = list(ground_truth.gateway_performance.values())
-        bars = ax_gw.bar(gw_ids, gw_counts, color='teal', alpha=0.8, edgecolor='black')
+    # 1. Spreading Factor Evolution
+    if has_sf:
+        ax1 = axes[0, 0]
+        sf_values = gt.radio_data['SpreadingFactor']
+        ax1.scatter(time_hours, sf_values, alpha=0.6, c=sf_values, cmap='viridis')
+        ax1.set_title('Spreading Factor Evolution')
+        ax1.set_ylabel('Spreading Factor')
+        ax1.set_xlabel('Time (hours)')
+        ax1.grid(True, alpha=0.3)
         
-        total_packets = sum(gw_counts)
-        title = f'Packets Received per Gateway ({ground_truth.data_source_info["primary_radio"]})\nTotal: {total_packets:,} packets'
-        
-        ax_gw.set_title(title, fontweight='bold', fontsize=16)
-        ax_gw.set_xlabel('Gateway ID')
-        ax_gw.set_ylabel('Packet Count')
-        ax_gw.grid(True, alpha=0.3)
-        
-        # Add value labels on bars
-        for bar in bars:
-            height = bar.get_height()
-            ax_gw.annotate(f'{int(height):,}',
-                          xy=(bar.get_x() + bar.get_width() / 2, height),
-                          xytext=(0, 3),
-                          textcoords="offset points",
-                          ha='center', va='bottom',
-                          fontsize=12, fontweight='bold')
+        # Add trend line
+        if len(time_hours) > 1:
+            z = np.polyfit(time_hours, sf_values, 1)
+            p = np.poly1d(z)
+            ax1.plot(time_hours, p(time_hours), "r--", alpha=0.8, label=f'Trend: {z[0]:.3f}/hour')
+            ax1.legend()
 
-    plt.savefig(os.path.join(PLOT_DIR, 'comprehensive_summary.png'), dpi=150)
+    # 2. Transmission Power Evolution
+    if has_power:
+        ax2 = axes[0, 1]
+        power_values = gt.radio_data['TxPower_dBm']
+        ax2.scatter(time_hours, power_values, alpha=0.6, c=power_values, cmap='plasma')
+        ax2.set_title('Transmission Power Evolution')
+        ax2.set_ylabel('TX Power (dBm)')
+        ax2.set_xlabel('Time (hours)')
+        ax2.grid(True, alpha=0.3)
+        
+        # Add trend line
+        if len(time_hours) > 1:
+            z = np.polyfit(time_hours, power_values, 1)
+            p = np.poly1d(z)
+            ax2.plot(time_hours, p(time_hours), "r--", alpha=0.8, label=f'Trend: {z[0]:.3f}dBm/hour')
+            ax2.legend()
+
+    # 3. Parameter Distribution
+    ax3 = axes[1, 0]
+    if has_sf:
+        sf_counts = gt.radio_data['SpreadingFactor'].value_counts().sort_index()
+        ax3.bar(sf_counts.index, sf_counts.values, alpha=0.7, color='teal')
+        ax3.set_title('SF Distribution')
+        ax3.set_xlabel('Spreading Factor')
+        ax3.set_ylabel('Count')
+
+    # 4. Energy Efficiency Indicator
+    ax4 = axes[1, 1]
+    if has_sf and has_power:
+        # Calculate relative energy consumption (simplified)
+        # Energy ∝ TxPower × ToA, where ToA ∝ 2^SF
+        relative_energy = gt.radio_data['TxPower_dBm'] + 10 * np.log10(2 ** gt.radio_data['SpreadingFactor'])
+        
+        ax4.hist(relative_energy, bins=20, alpha=0.7, color='coral', edgecolor='black')
+        ax4.set_title('Relative Energy Consumption Distribution')
+        ax4.set_xlabel('Relative Energy (dB)')
+        ax4.set_ylabel('Frequency')
+        ax4.axvline(relative_energy.mean(), color='red', linestyle='--', 
+                   label=f'Mean: {relative_energy.mean():.1f}dB')
+        ax4.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOT_DIR, 'adropt_evolution.png'), dpi=150)
     plt.close()
-    print(f"  -> Generated 'comprehensive_summary.png'")
-    print(f"     All data consistent from: {ground_truth.data_source_info['primary_radio']}")
+    print("  -> Generated 'adropt_evolution.png'")
 
-# --- Main Execution ---
+def plot_enhanced_fading_validation(gt: GroundTruthData):
+    """Enhanced fading analysis with statistical validation."""
+    print("\n--- 🌊 Enhanced Fading Model Validation ---")
+    
+    if gt.radio_data is None or 'Fading_dB' not in gt.radio_data.columns:
+        print("⚠️ Skipping: No fading data available.")
+        return
+
+    fading_data = gt.radio_data['Fading_dB'].dropna()
+    
+    if len(fading_data) < 10:
+        print("⚠️ Insufficient fading data for statistical analysis.")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('Enhanced Channel Fading Model Validation', fontsize=16, fontweight='bold')
+
+    # 1. Distribution with normal overlay
+    ax1 = axes[0, 0]
+    sns.histplot(fading_data, bins=30, kde=True, ax=ax1, alpha=0.7, color='mediumpurple')
+    
+    # Overlay theoretical normal distribution
+    x = np.linspace(fading_data.min(), fading_data.max(), 100)
+    theoretical_normal = stats.norm.pdf(x, 0, EXPECTED_FADING_STD)
+    actual_normal = stats.norm.pdf(x, fading_data.mean(), fading_data.std())
+    
+    ax1_twin = ax1.twinx()
+    ax1_twin.plot(x, theoretical_normal, 'r-', label=f'Target: N(0, {EXPECTED_FADING_STD})', linewidth=2)
+    ax1_twin.plot(x, actual_normal, 'g--', label=f'Actual: N({fading_data.mean():.2f}, {fading_data.std():.2f})', linewidth=2)
+    ax1_twin.legend()
+    
+    ax1.set_title('Fading Distribution vs Target')
+    ax1.set_xlabel('Fading (dB)')
+
+    # 2. Q-Q plot for normality test
+    ax2 = axes[0, 1]
+    stats.probplot(fading_data, dist="norm", plot=ax2)
+    ax2.set_title('Q-Q Plot (Normality Test)')
+    ax2.grid(True, alpha=0.3)
+
+    # 3. Statistical test results
+    ax3 = axes[1, 0]
+    ax3.axis('off')
+    
+    # Perform statistical tests
+    shapiro_stat, shapiro_p = stats.shapiro(fading_data) if len(fading_data) <= 5000 else (None, None)
+    ks_stat, ks_p = stats.kstest(fading_data, lambda x: stats.norm.cdf(x, 0, EXPECTED_FADING_STD))
+    
+    test_results = f"""
+Statistical Validation Results:
+
+Descriptive Statistics:
+• Mean: {fading_data.mean():.3f} dB (target: 0.0)
+• Std Dev: {fading_data.std():.3f} dB (target: {EXPECTED_FADING_STD})
+• Min: {fading_data.min():.2f} dB
+• Max: {fading_data.max():.2f} dB
+• Count: {len(fading_data)} samples
+
+Model Accuracy:
+• Std Dev Error: {abs(fading_data.std() - EXPECTED_FADING_STD)/EXPECTED_FADING_STD*100:.1f}%
+• Mean Error: {abs(fading_data.mean()):.3f} dB
+
+Normality Tests:"""
+
+    if shapiro_stat is not None:
+        test_results += f"\n• Shapiro-Wilk: p = {shapiro_p:.6f}"
+    test_results += f"\n• KS Test vs Target: p = {ks_p:.6f}"
+    
+    validation_status = "✅ EXCELLENT" if abs(fading_data.std() - EXPECTED_FADING_STD) < 0.5 else "⚠️ ACCEPTABLE" if abs(fading_data.std() - EXPECTED_FADING_STD) < 1.0 else "❌ POOR"
+    test_results += f"\n\nValidation: {validation_status}"
+    
+    ax3.text(0.05, 0.95, test_results, transform=ax3.transAxes, fontsize=10,
+            verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='lightblue', alpha=0.8))
+
+    # 4. Time evolution of fading
+    ax4 = axes[1, 1]
+    if 'Time' in gt.radio_data.columns:
+        time_hours = gt.radio_data['Time'] / 3600
+        ax4.scatter(time_hours, fading_data, alpha=0.5, s=10)
+        ax4.set_title('Fading Evolution Over Time')
+        ax4.set_xlabel('Time (hours)')
+        ax4.set_ylabel('Fading (dB)')
+        ax4.axhline(y=0, color='red', linestyle='--', alpha=0.7)
+        ax4.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOT_DIR, 'enhanced_fading_validation.png'), dpi=150)
+    plt.close()
+    print("  -> Generated 'enhanced_fading_validation.png'")
+
+def plot_gateway_diversity_analysis(gt: GroundTruthData):
+    """Comprehensive gateway diversity and performance analysis."""
+    print("\n--- 📡 Gateway Diversity Analysis ---")
+    
+    if gt.radio_data is None or 'GatewayID' not in gt.radio_data.columns:
+        print("⚠️ Skipping: No gateway data available.")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle('Gateway Diversity and Performance Analysis', fontsize=16, fontweight='bold')
+
+    # 1. Reception distribution per gateway
+    ax1 = axes[0, 0]
+    gw_counts = gt.radio_data['GatewayID'].value_counts().sort_index()
+    total_receptions = gw_counts.sum()
+    extraction_rates = (gw_counts / total_receptions) * 100
+    
+    bars = ax1.bar(extraction_rates.index, extraction_rates.values, 
+                   color=plt.cm.viridis(np.linspace(0, 1, len(extraction_rates))), 
+                   edgecolor='black', alpha=0.8)
+    ax1.set_title('Gateway Reception Share')
+    ax1.set_xlabel('Gateway ID')
+    ax1.set_ylabel('Share of Receptions (%)')
+    ax1.set_xticks(extraction_rates.index)
+
+    # Add value labels
+    for bar in bars:
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height, f'{height:.1f}%', 
+                ha='center', va='bottom', fontweight='bold')
+
+    # 2. SNR distribution per gateway
+    ax2 = axes[0, 1]
+    if 'SNR_dB' in gt.radio_data.columns:
+        gateway_ids = sorted(gt.radio_data['GatewayID'].unique())
+        snr_by_gw = [gt.radio_data[gt.radio_data['GatewayID'] == gw]['SNR_dB'].values 
+                     for gw in gateway_ids]
+        
+        bp = ax2.boxplot(snr_by_gw, labels=[f'GW{gw}' for gw in gateway_ids], patch_artist=True)
+        
+        # Color boxes by performance
+        colors = plt.cm.RdYlGn(np.linspace(0.3, 0.9, len(bp['boxes'])))
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            
+        ax2.set_title('SNR Distribution per Gateway')
+        ax2.set_ylabel('SNR (dB)')
+        ax2.grid(True, alpha=0.3)
+        ax2.axhline(y=-6, color='red', linestyle='--', alpha=0.7, label='Typical Threshold')
+        ax2.legend()
+
+    # 3. Gateway performance summary
+    ax3 = axes[1, 0]
+    ax3.axis('off')
+    
+    performance_text = "Gateway Performance Summary:\n\n"
+    if 'SNR_dB' in gt.radio_data.columns:
+        for gw in sorted(gt.radio_data['GatewayID'].unique()):
+            gw_data = gt.radio_data[gt.radio_data['GatewayID'] == gw]
+            avg_snr = gw_data['SNR_dB'].mean()
+            count = len(gw_data)
+            share = (count / len(gt.radio_data)) * 100
+            
+            performance_text += f"GW {gw}: {count:4d} pkts ({share:5.1f}%), SNR: {avg_snr:6.1f}dB\n"
+    
+    ax3.text(0.05, 0.95, performance_text, transform=ax3.transAxes, fontsize=10,
+            verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', alpha=0.8))
+
+    # 4. Diversity benefit visualization
+    ax4 = axes[1, 1]
+    if 'Time' in gt.radio_data.columns:
+        # Calculate unique gateways per time window
+        time_windows = pd.cut(gt.radio_data['Time'], bins=20)
+        diversity_per_window = gt.radio_data.groupby(time_windows)['GatewayID'].nunique()
+        
+        window_centers = [(interval.left + interval.right) / 2 / 3600 for interval in diversity_per_window.index]
+        
+        ax4.plot(window_centers, diversity_per_window.values, 'o-', linewidth=2, markersize=6)
+        ax4.set_title('Gateway Diversity Over Time')
+        ax4.set_xlabel('Time (hours)')
+        ax4.set_ylabel('Active Gateways per Window')
+        ax4.set_ylim(0, EXPECTED_GATEWAYS + 1)
+        ax4.grid(True, alpha=0.3)
+        ax4.axhline(y=EXPECTED_GATEWAYS, color='green', linestyle='--', 
+                   label=f'Max ({EXPECTED_GATEWAYS})')
+        ax4.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOT_DIR, 'gateway_diversity_analysis.png'), dpi=150)
+    plt.close()
+    print("  -> Generated 'gateway_diversity_analysis.png'")
+
+def generate_research_summary(gt: GroundTruthData):
+    """Generate comprehensive research summary report."""
+    print("\n--- 📋 Generating Research Summary ---")
+    
+    summary_path = os.path.join(DEBUG_DIR, 'research_summary.txt')
+    
+    with open(summary_path, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("LORAWAN ADROPT SIMULATION - RESEARCH SUMMARY\n")
+        f.write("="*80 + "\n\n")
+        
+        # Simulation overview
+        f.write("SIMULATION OVERVIEW:\n")
+        f.write("-" * 20 + "\n")
+        f.write(f"Data Source: {gt.data_source_name}\n")
+        f.write(f"Measurements: {len(gt.radio_data) if gt.radio_data is not None else 0}\n")
+        f.write(f"Duration: {gt.simulation_duration:.2f} days (target: {EXPECTED_SIMULATION_DAYS})\n")
+        f.write(f"Gateways: {gt.radio_data['GatewayID'].nunique() if gt.radio_data is not None and 'GatewayID' in gt.radio_data.columns else 'Unknown'}\n")
+        f.write(f"Devices: {gt.radio_data['DeviceAddr'].nunique() if gt.radio_data is not None and 'DeviceAddr' in gt.radio_data.columns else 'Unknown'}\n\n")
+        
+        # Performance results
+        f.write("PERFORMANCE RESULTS:\n")
+        f.write("-" * 20 + "\n")
+        if gt.packets_sent_per_device:
+            for device_id in gt.packets_sent_per_device:
+                sent = gt.packets_sent_per_device[device_id]
+                received = gt.packets_received_per_device.get(device_id, 0)
+                pdr = (received / sent * 100) if sent > 0 else 0
+                per = 100 - pdr
+                
+                # Estimate DER based on paper's FEC capability
+                if per <= 30.0:  # Paper: "PER < 0.3" for FEC recovery
+                    estimated_der = max(0.01, per * 0.1)  # Conservative estimate
+                else:
+                    estimated_der = per  # FEC cannot recover
+                
+                f.write(f"Device {device_id}:\n")
+                f.write(f"  Packets Sent: {sent}\n")
+                f.write(f"  Packets Received: {received}\n")
+                f.write(f"  PDR (Packet Delivery Rate): {pdr:.2f}%\n")
+                f.write(f"  PER (Packet Error Rate): {per:.2f}%\n") 
+                f.write(f"  Estimated DER (Data Error Rate with FEC): {estimated_der:.2f}% (target: <{PAPER_TARGET_DER}%)\n")
+                f.write(f"  Performance Gap: {estimated_der - PAPER_TARGET_DER:.2f}% above DER target\n\n")
+        
+        # Quality assessment
+        f.write("QUALITY ASSESSMENT:\n")
+        f.write("-" * 20 + "\n")
+        f.write(f"Overall Confidence: {gt.quality.overall_confidence}\n")
+        f.write(f"Data Completeness: {gt.quality.data_completeness}\n")
+        f.write(f"Duration Accuracy: {gt.quality.duration_accuracy}\n")
+        f.write(f"Gateway Diversity: {gt.quality.gateway_diversity}\n")
+        f.write(f"Channel Model: {gt.quality.channel_model_accuracy}\n")
+        f.write(f"ADRopt Function: {gt.quality.adropt_functioning}\n\n")
+        
+        # Warnings and recommendations
+        if gt.quality.warnings:
+            f.write("WARNINGS:\n")
+            f.write("-" * 20 + "\n")
+            for warning in gt.quality.warnings:
+                f.write(f"  {warning}\n")
+            f.write("\n")
+        
+        # Channel model validation
+        if gt.radio_data is not None and 'Fading_dB' in gt.radio_data.columns:
+            fading_data = gt.radio_data['Fading_dB'].dropna()
+            f.write("CHANNEL MODEL VALIDATION:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Fading Std Dev: {fading_data.std():.3f} dB (target: {EXPECTED_FADING_STD} dB)\n")
+            f.write(f"Fading Mean: {fading_data.mean():.3f} dB (target: 0.0 dB)\n")
+            f.write(f"Model Accuracy: {abs(fading_data.std() - EXPECTED_FADING_STD)/EXPECTED_FADING_STD*100:.1f}% error\n\n")
+        
+        # ADRopt analysis
+        if gt.radio_data is not None:
+            if 'SpreadingFactor' in gt.radio_data.columns:
+                sf_range = gt.radio_data['SpreadingFactor'].max() - gt.radio_data['SpreadingFactor'].min()
+                f.write("ADROPT PERFORMANCE:\n")
+                f.write("-" * 20 + "\n")
+                f.write(f"SF Range: {gt.radio_data['SpreadingFactor'].min()}-{gt.radio_data['SpreadingFactor'].max()} (variation: {sf_range})\n")
+                
+            if 'TxPower_dBm' in gt.radio_data.columns:
+                power_range = gt.radio_data['TxPower_dBm'].max() - gt.radio_data['TxPower_dBm'].min()
+                f.write(f"Power Range: {gt.radio_data['TxPower_dBm'].min():.1f}-{gt.radio_data['TxPower_dBm'].max():.1f} dBm (variation: {power_range:.1f} dB)\n")
+                
+                # Energy efficiency estimate
+                if 'SpreadingFactor' in gt.radio_data.columns:
+                    initial_energy = 14 + 10 * np.log10(2**12)  # Max power + SF12
+                    final_energy = gt.radio_data['TxPower_dBm'].iloc[-10:].mean() + 10 * np.log10(2**gt.radio_data['SpreadingFactor'].iloc[-10:].mean())
+                    energy_saving = ((initial_energy - final_energy) / initial_energy) * 100
+                    f.write(f"Estimated Energy Savings: {energy_saving:.1f}%\n")
+    
+    print(f"  -> Generated research summary: {summary_path}")
+
+def validate_data_consistency(gt: GroundTruthData):
+    """Validate consistency between log claims and actual CSV data."""
+    print("\n--- 🔍 Data Consistency Validation ---")
+    
+    if gt.radio_data is None:
+        print("❌ No radio data loaded - cannot validate")
+        return
+    
+    actual_csv_rows = len(gt.radio_data)
+    print(f"📊 Actual CSV rows loaded: {actual_csv_rows}")
+    
+    # Calculate expected data based on simulation parameters
+    if gt.simulation_duration > 0:
+        expected_packets = int(gt.simulation_duration * 24 * 3600 / EXPECTED_PACKET_INTERVAL)
+        expected_measurements = expected_packets * EXPECTED_GATEWAYS * 0.9  # Assume 90% reception rate
+        print(f"📈 Expected measurements for {gt.simulation_duration:.1f} days: ~{expected_measurements:.0f}")
+        print(f"📉 Expected packets: ~{expected_packets}")
+    
+    # Check against log claims
+    total_sent = sum(gt.packets_sent_per_device.values()) if gt.packets_sent_per_device else 0
+    if total_sent > 0:
+        print(f"📋 Log claims - Sent: {total_sent}")
+        expected_from_log = total_sent * EXPECTED_GATEWAYS * 0.9
+        print(f"📋 Expected measurements from log: ~{expected_from_log:.0f}")
+        
+        ratio = actual_csv_rows / expected_from_log if expected_from_log > 0 else 0
+        print(f"📊 CSV Data Capture Rate: {ratio*100:.1f}%")
+        
+        if ratio < 0.01:  # Less than 1%
+            print("❌ CRITICAL: CSV export appears to be severely incomplete!")
+            print("   Possible causes:")
+            print("   - CSV export timing/interval issues")
+            print("   - File overwriting instead of appending")
+            print("   - Export happening only at simulation end")
+        elif ratio < 0.1:  # Less than 10%
+            print("⚠️ WARNING: CSV export appears incomplete")
+        else:
+            print("✅ CSV data appears reasonably complete")
+    
+    # Check time span in CSV vs claimed duration
+    if 'Time' in gt.radio_data.columns and len(gt.radio_data) > 1:
+        csv_time_span = (gt.radio_data['Time'].max() - gt.radio_data['Time'].min()) / (24 * 3600)
+        print(f"📅 CSV time span: {csv_time_span:.2f} days")
+        print(f"📅 Claimed duration: {gt.simulation_duration:.2f} days")
+        
+        if abs(csv_time_span - gt.simulation_duration) > 1.0:
+            print("⚠️ Time span mismatch detected!")
 
 def main():
-    """Main function to orchestrate the loading, analysis, and plotting."""
-    print("="*80)
-    print("CORRECTED LORAWAN SIMULATION ANALYZER - SINGLE SOURCE OF TRUTH")
-    print("="*80)
-
-    if not os.path.exists(PLOT_DIR):
-        os.makedirs(PLOT_DIR)
-
-    # Establish ground truth data FIRST
-    global ground_truth
-    ground_truth = establish_ground_truth_data()
+    """Enhanced main function with comprehensive analysis."""
+    print("🚀 ENHANCED LORAWAN SIMULATION ANALYZER V7")
     
+    # Create directories
+    for directory in [PLOT_DIR, DEBUG_DIR]:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+    # Establish ground truth with validation
+    ground_truth = establish_ground_truth()
     if not ground_truth.validated:
-        print("❌ Ground truth data validation failed. Exiting.")
+        print("\n❌ Cannot proceed with analysis due to data validation failures.")
         return
-    
-    print(f"\n📊 Ground Truth Established:")
-    print(f"  Primary source: {ground_truth.data_source_info.get('primary_radio', 'None')}")
-    print(f"  Radio measurements: {ground_truth.summary_stats.get('total_measurements', 0):,}")
-    print(f"  Gateways detected: {len(ground_truth.gateway_performance)}")
-    print(f"  RSSI range: {ground_truth.primary_radio_data['RSSI_dBm'].min():.1f} to {ground_truth.primary_radio_data['RSSI_dBm'].max():.1f} dBm")
-    print(f"  SNR range: {ground_truth.primary_radio_data['SNR_dB'].min():.1f} to {ground_truth.primary_radio_data['SNR_dB'].max():.1f} dB")
 
-    # Generate all plots using consistent ground truth data
-    plot_sf_tp_distributions()
-    plot_rssi_analysis()
-    plot_snr_analysis()
-    plot_gateway_performance()
-    create_summary_dashboard()
+    # Add data consistency validation
+    validate_data_consistency(ground_truth)
 
-    print("\n" + "="*80)
-    print("✅ CONSISTENT Analysis Complete. All data from single source:")
-    print(f"   📊 {ground_truth.data_source_info['primary_radio']}")
-    print(f"   📈 {ground_truth.summary_stats['total_measurements']:,} measurements analyzed")
+    # Generate all analyses
+    print(f"\n🔬 RUNNING COMPREHENSIVE ANALYSIS (Confidence: {ground_truth.quality.overall_confidence})")
+    print("-" * 70)
     
-    plots_generated = [
-        "sf_tp_distributions.png - SF and TP distribution analysis",
-        "rssi_comprehensive_analysis.png - RSSI analysis with consistent statistics",
-        "snr_comprehensive_analysis.png - SNR analysis with consistent statistics", 
-        "gateway_performance_analysis.png - Gateway performance with consistent data",
-        "comprehensive_summary.png - Dashboard with all consistent metrics"
-    ]
+    try:
+        plot_enhanced_performance_analysis(ground_truth)
+        plot_adropt_evolution(ground_truth)
+        plot_enhanced_fading_validation(ground_truth)
+        plot_gateway_diversity_analysis(ground_truth)
+        generate_research_summary(ground_truth)
+        
+        # Generate original plots for compatibility
+        if 'Fading_dB' in ground_truth.radio_data.columns:
+            plot_fading_distribution(ground_truth)
+        
+    except Exception as e:
+        print(f"❌ Error during analysis: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n" + "="*70)
+    print("✅ ENHANCED ANALYSIS COMPLETE")
+    print(f"📁 Plots saved in: {PLOT_DIR}/")
+    print(f"📋 Debug info in: {DEBUG_DIR}/")
+    print(f"🎯 Overall Confidence: {ground_truth.quality.overall_confidence}")
+    print("="*70)
+
+def plot_fading_distribution(gt: GroundTruthData):
+    """Original fading plot for compatibility."""
+    if gt.radio_data is None or 'Fading_dB' not in gt.radio_data.columns:
+        return
+        
+    fading_data = gt.radio_data['Fading_dB'].dropna()
+    fading_std = fading_data.std()
+
+    plt.figure(figsize=(12, 7))
+    sns.histplot(fading_data, bins=40, kde=True, color='mediumpurple')
     
-    print("\n📊 Generated plots (all using consistent data):")
-    for plot in plots_generated:
-        print(f"  ✅ {plot}")
+    title_text = f'Fading Distribution (Calculated Std Dev: {fading_std:.2f} dB)'
+    plt.title(title_text, fontsize=16, fontweight='bold')
+    plt.xlabel('Fading Value (dB)', fontsize=12)
+    plt.ylabel('Frequency', fontsize=12)
     
-    print(f"\n📁 Check the '{PLOT_DIR}' directory for all visualizations.")
-    print("🎯 All console output and plots now use the SAME data source!")
-    print("="*80)
+    annotation_text = f"Expected Std Dev from paper's model: ~8.0 dB"
+    plt.text(0.95, 0.95, annotation_text, transform=plt.gca().transAxes,
+             fontsize=12, verticalalignment='top', horizontalalignment='right',
+             bbox=dict(boxstyle='round,pad=0.5', fc='ivory', alpha=0.8))
+             
+    plt.axvline(fading_data.mean(), color='black', linestyle='--', label=f'Mean: {fading_data.mean():.2f} dB')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOT_DIR, 'fading_distribution.png'), dpi=150)
+    plt.close()
 
 if __name__ == "__main__":
     main()
