@@ -60,7 +60,7 @@ public:
     };
 
     // --- Method Declarations ---
-
+    void SetFecAware(bool fecAware);
     static TypeId GetTypeId();
 
     ADRoptComponent();

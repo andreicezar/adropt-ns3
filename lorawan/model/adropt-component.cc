@@ -73,7 +73,7 @@ ADRoptComponent::GetTypeId()
 }
 
 ADRoptComponent::ADRoptComponent()
-    : m_perTarget(0.1),
+    : m_perTarget(0.3),
       m_historyRange(20),
       m_enablePowerControl(true),
       m_payloadSize(20)
@@ -611,6 +611,14 @@ ADRoptComponent::GetMeanSNRForGateway(const Address& gwAddr, Ptr<EndDeviceStatus
     
     double sum = std::accumulate(snrValues.begin(), snrValues.end(), 0.0);
     return sum / snrValues.size();
+}
+
+void
+ADRoptComponent::SetFecAware(bool fecAware)
+{
+    m_perTarget = fecAware ? 0.30 : 0.10;
+    NS_LOG_INFO("ADRopt PER target set to " << m_perTarget 
+                << (fecAware ? " (FEC-aware)" : " (standard)"));
 }
 
 } // namespace lorawan

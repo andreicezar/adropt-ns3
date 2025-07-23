@@ -25,6 +25,12 @@
 #include "ns3/packet.h"
 #include "ns3/point-to-point-net-device.h"
 
+// *** ADD INCLUDES FOR FEC ***
+#include <map>
+#include <vector>
+#include <queue>
+#include <set>
+
 namespace ns3
 {
 namespace lorawan
@@ -118,12 +124,62 @@ class NetworkServer : public Application
      */
     Ptr<NetworkStatus> GetNetworkStatus();
 
+    // *** ADD FEC PUBLIC METHODS ***
+    void EnableFec(bool enable) { m_fecConfig.enabled = enable; }
+    void SetFecGenerationSize(uint32_t size) { m_fecConfig.generationSize = size; }
+    double GetApplicationDER(uint32_t deviceAddr) const;
+
   protected:
     Ptr<NetworkStatus> m_status;         //!< Ptr to the NetworkStatus object.
     Ptr<NetworkController> m_controller; //!< Ptr to the NetworkController object.
     Ptr<NetworkScheduler> m_scheduler;   //!< Ptr to the NetworkScheduler object.
 
     TracedCallback<Ptr<const Packet>> m_receivedPacket; //!< The `ReceivedPacket` trace source.
+
+  private:
+    // *** ADD FEC DECODER FUNCTIONALITY ***
+    
+    // FEC Configuration
+    struct FecConfig {
+        bool enabled = true;
+        uint32_t generationSize = 128;
+        double targetPER = 0.30;
+        Time generationTimeout = Seconds(600); // 10 minutes
+    } m_fecConfig;
+
+    // FEC Generation State
+    struct FecGeneration {
+        std::map<uint8_t, Ptr<Packet>> systematicPackets;  // index -> packet
+        std::vector<std::pair<std::vector<uint8_t>, Ptr<Packet>>> redundantPackets;
+        std::set<uint8_t> recoveredIndices;
+        Time lastActivity;
+        bool isComplete = false;
+        
+        FecGeneration() : lastActivity(Simulator::Now()) {}
+    };
+    
+    // Per-device FEC state
+    std::map<uint32_t, std::map<uint16_t, FecGeneration>> m_deviceFecGenerations;
+    
+    // FEC Statistics
+    std::map<uint32_t, uint32_t> m_deviceOriginalPackets;
+    std::map<uint32_t, uint32_t> m_deviceRecoveredPackets;
+    std::map<uint32_t, uint32_t> m_deviceLostPackets;
+    
+    // FEC Methods
+    bool ProcessFecPacket(Ptr<const Packet> packet, const Address& gwAddress);
+    uint32_t ExtractDeviceAddress(Ptr<const Packet> packet);
+    bool AttemptFecRecovery(uint32_t deviceAddr, uint16_t generationId);
+    std::vector<Ptr<Packet>> SolveFecSystem(FecGeneration& generation);
+    void DeliverApplicationPackets(uint32_t deviceAddr, const std::vector<Ptr<Packet>>& packets);
+    void CleanupOldGenerations();
+    void ProcessFecPacketAsync(Ptr<const Packet> packet, const Address& gwAddress);
+    // Galois Field operations
+    uint8_t GfMultiply(uint8_t a, uint8_t b);
+    uint8_t GfDivide(uint8_t a, uint8_t b);
+    void InitializeGfTables();
+    std::vector<uint8_t> m_gfExp;
+    std::vector<uint8_t> m_gfLog;
 };
 
 } // namespace lorawan

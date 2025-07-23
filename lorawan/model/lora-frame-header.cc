@@ -490,5 +490,86 @@ LoraFrameHeader::AddCommand(Ptr<MacCommand> macCommand)
     m_fOptsLen += macCommand->GetSerializedSize();
 }
 
+// =====================================================
+// *** DaRe FEC Header Implementation ***
+// =====================================================
+
+NS_OBJECT_ENSURE_REGISTERED(DareFecHeader);
+
+TypeId
+DareFecHeader::GetTypeId()
+{
+    static TypeId tid =
+        TypeId("DareFecHeader").SetParent<Header>().AddConstructor<DareFecHeader>();
+    return tid;
+}
+
+DareFecHeader::DareFecHeader()
+    : m_generationId(0),
+      m_packetIndex(0),
+      m_packetType(0)
+{
+}
+
+DareFecHeader::~DareFecHeader()
+{
+}
+
+TypeId
+DareFecHeader::GetInstanceTypeId() const
+{
+    return GetTypeId();
+}
+
+uint32_t
+DareFecHeader::GetSerializedSize() const
+{
+    // 2 bytes genId + 1 byte index + 1 byte type + combination vector size
+    return 4 + m_combinationVector.size();
+}
+
+void
+DareFecHeader::Serialize(Buffer::Iterator start) const
+{
+    start.WriteHtonU16(m_generationId);
+    start.WriteU8(m_packetIndex);
+    start.WriteU8(m_packetType);
+    
+    // Write combination vector for redundant packets
+    for (uint8_t coeff : m_combinationVector) {
+        start.WriteU8(coeff);
+    }
+}
+
+uint32_t
+DareFecHeader::Deserialize(Buffer::Iterator start)
+{
+    m_generationId = start.ReadNtohU16();
+    m_packetIndex = start.ReadU8();
+    m_packetType = start.ReadU8();
+    
+    uint32_t bytesRead = 4;
+    
+    // For redundant packets, read combination vector
+    if (m_packetType == 1) {
+        // Assume 128-byte combination vector for 128-packet generations
+        m_combinationVector.clear();
+        for (uint32_t i = 0; i < 128; ++i) {
+            m_combinationVector.push_back(start.ReadU8());
+            bytesRead++;
+        }
+    }
+    
+    return bytesRead;
+}
+
+void
+DareFecHeader::Print(std::ostream& os) const
+{
+    os << "DareFecHeader: Gen=" << m_generationId 
+       << ", Index=" << static_cast<uint32_t>(m_packetIndex)
+       << ", Type=" << (IsSystematicPacket() ? "Systematic" : "Redundant");
+}
+
 } // namespace lorawan
 } // namespace ns3

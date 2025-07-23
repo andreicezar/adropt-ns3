@@ -14,6 +14,8 @@
 
 #include "ns3/header.h"
 
+#include <vector>  // *** ADD THIS FOR FEC ***
+
 namespace ns3
 {
 namespace lorawan
@@ -346,6 +348,51 @@ LoraFrameHeader::GetMacCommand()
     // If no command was found, return 0
     return nullptr;
 }
+
+// *** ADD FEC HEADER CLASS ***
+
+/**
+ * @ingroup lorawan
+ *
+ * This class represents the DaRe FEC header for inter-packet Forward Error Correction.
+ * Based on Heusse et al. (2020) "Adaptive Data Rate for Multiple Gateways LoRaWAN Networks"
+ */
+class DareFecHeader : public Header
+{
+public:
+    DareFecHeader();
+    virtual ~DareFecHeader();
+
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
+
+    // FEC-specific methods
+    void SetGenerationId(uint16_t genId) { m_generationId = genId; }
+    uint16_t GetGenerationId() const { return m_generationId; }
+    
+    void SetPacketIndex(uint8_t index) { m_packetIndex = index; }
+    uint8_t GetPacketIndex() const { return m_packetIndex; }
+    
+    void SetPacketType(uint8_t type) { m_packetType = type; }
+    uint8_t GetPacketType() const { return m_packetType; }
+    
+    void SetCombinationVector(const std::vector<uint8_t>& vector) { m_combinationVector = vector; }
+    const std::vector<uint8_t>& GetCombinationVector() const { return m_combinationVector; }
+    
+    bool IsSystematicPacket() const { return m_packetType == 0; }
+    bool IsRedundantPacket() const { return m_packetType == 1; }
+
+private:
+    uint16_t m_generationId;                    // Generation (block) ID
+    uint8_t m_packetIndex;                      // Index within generation
+    uint8_t m_packetType;                       // 0=systematic, 1=redundant
+    std::vector<uint8_t> m_combinationVector;   // Linear combination coefficients (GF256)
+};
+
 } // namespace lorawan
 
 } // namespace ns3
